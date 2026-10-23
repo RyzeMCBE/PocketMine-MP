@@ -41,6 +41,12 @@ use function in_array;
 use const pocketmine\RESOURCE_PATH;
 
 final class NativeDimensionGeneratorTest extends TestCase{
+	public function testExpiredPharResourcePathsUseTheCurrentServerResources() : void{
+		$preset = GeneratorOptions::encode(__DIR__ . '/expired-phar-cache/resources');
+		self::assertSame(RESOURCE_PATH, GeneratorOptions::resourceFolder($preset));
+		self::assertSame(RESOURCE_PATH, GeneratorOptions::resourceFolder(GeneratorOptions::encode(RESOURCE_PATH)));
+	}
+
 	public function testStructureTemplatesAndBlockStatesResolve() : void{
 		$template = StructureTemplates::get(RESOURCE_PATH, 'bastion/units/air_base');
 		self::assertNotNull($template);

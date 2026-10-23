@@ -23,17 +23,19 @@ declare(strict_types=1);
 
 namespace pocketmine\world\dimension\generator;
 
+use pocketmine\world\dimension\generator\structure\template\StructureTemplates;
+use function file_exists;
 use function is_array;
 use function is_string;
 use function json_decode;
 use function json_encode;
+use function rtrim;
 use const JSON_THROW_ON_ERROR;
+use const pocketmine\RESOURCE_PATH;
 
 /**
- * The generator preset of the nether and end worlds. Generators run on worker
- * threads and cannot reach the plugin, so the plugin resource folder, where
- * the structure templates live, travels inside the preset string saved with
- * the world.
+ * Structure resource settings shared with generator workers. Stored PHAR paths
+ * may refer to an expired decompression cache after a server restart.
  */
 final class GeneratorOptions{
 
@@ -44,7 +46,8 @@ final class GeneratorOptions{
 	public static function resourceFolder(string $preset) : string{
 		$decoded = json_decode($preset, true);
 		if(is_array($decoded) && is_string($decoded["resources"] ?? null)){
-			return $decoded["resources"];
+			$folder = $decoded["resources"];
+			return file_exists(rtrim($folder, "/\\") . "/" . StructureTemplates::FILE) ? $folder : RESOURCE_PATH;
 		}
 		return "";
 	}
