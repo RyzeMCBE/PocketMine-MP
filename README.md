@@ -1,3 +1,5 @@
+> Este fork incorpora soporte para Minecraft Bedrock **1.26.52** (protocolo **2193**) conservando la arquitectura original de PocketMine-MP. Composer instala los forks de BedrockProtocol y BedrockData de RyzeMCBE en las revisiones fijadas por el proyecto.
+
 # End of support announcement
 
 Hello all,

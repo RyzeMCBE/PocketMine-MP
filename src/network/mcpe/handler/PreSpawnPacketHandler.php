@@ -23,14 +23,17 @@ declare(strict_types=1);
 
 namespace pocketmine\network\mcpe\handler;
 
+use pocketmine\data\bedrock\BedrockDataFiles;
 use pocketmine\nbt\tag\CompoundTag;
 use pocketmine\network\mcpe\cache\CraftingDataCache;
 use pocketmine\network\mcpe\cache\StaticPacketCache;
 use pocketmine\network\mcpe\InventoryManager;
 use pocketmine\network\mcpe\NetworkSession;
 use pocketmine\network\mcpe\protocol\ItemRegistryPacket;
+use pocketmine\network\mcpe\protocol\JigsawStructureDataPacket;
 use pocketmine\network\mcpe\protocol\PlayerAuthInputPacket;
 use pocketmine\network\mcpe\protocol\RequestChunkRadiusPacket;
+use pocketmine\network\mcpe\protocol\serializer\NetworkNbtSerializer;
 use pocketmine\network\mcpe\protocol\ServerboundLoadingScreenPacket;
 use pocketmine\network\mcpe\protocol\StartGamePacket;
 use pocketmine\network\mcpe\protocol\types\BlockPosition;
@@ -46,9 +49,15 @@ use pocketmine\network\mcpe\protocol\types\SpawnSettings;
 use pocketmine\player\Player;
 use pocketmine\Server;
 use pocketmine\timings\Timings;
+use pocketmine\utils\Filesystem;
 use pocketmine\VersionInfo;
 use Ramsey\Uuid\Uuid;
+use function base64_decode;
+use function is_array;
+use function is_string;
+use function json_decode;
 use function sprintf;
+use const JSON_THROW_ON_ERROR;
 
 /**
  * Handler used for the pre-spawn phase of the session.
@@ -56,6 +65,24 @@ use function sprintf;
 #[SilentDiscard(PlayerAuthInputPacket::class, comment: "Spammed after StartGame even though player has no controls")]
 #[SilentDiscard(ServerboundLoadingScreenPacket::class, "Not needed")]
 class PreSpawnPacketHandler extends PacketHandler{
+	private static ?JigsawStructureDataPacket $jigsawStructureData = null;
+
+	private static function jigsawStructureData() : JigsawStructureDataPacket{
+		if(self::$jigsawStructureData === null){
+			$json = json_decode(Filesystem::fileGetContents(BedrockDataFiles::JIGSAW_STRUCTURES_JSON), true, flags: JSON_THROW_ON_ERROR);
+			if(!is_array($json) || !is_string($json["nbtB64"] ?? null)){
+				throw new \UnexpectedValueException("Invalid jigsaw structure definitions");
+			}
+			$rawNbt = base64_decode($json["nbtB64"], true);
+			if($rawNbt === false){
+				throw new \UnexpectedValueException("Invalid jigsaw structure NBT encoding");
+			}
+			$nbt = (new NetworkNbtSerializer())->read($rawNbt)->mustGetCompoundTag();
+			self::$jigsawStructureData = JigsawStructureDataPacket::create(new CacheableNbt($nbt));
+		}
+		return self::$jigsawStructureData;
+	}
+
 	public function __construct(
 		private Server $server,
 		private Player $player,
@@ -70,6 +97,7 @@ class PreSpawnPacketHandler extends PacketHandler{
 			$world = $location->getWorld();
 
 			$typeConverter = $this->session->getTypeConverter();
+			$this->session->sendDataPacket(self::jigsawStructureData());
 
 			$this->session->getLogger()->debug("Preparing StartGamePacket");
 			$levelSettings = new LevelSettings();
@@ -111,7 +139,7 @@ class PreSpawnPacketHandler extends PacketHandler{
 				sprintf("%s %s", VersionInfo::NAME, VersionInfo::VERSION()->getFullVersion(true)),
 				Uuid::fromString(Uuid::NIL),
 				false,
-				false,
+				true,
 				new NetworkPermissions(disableClientSounds: true),
 				true,
 				null,

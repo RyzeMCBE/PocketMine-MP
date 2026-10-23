@@ -27,17 +27,27 @@ use pocketmine\entity\InvalidSkinException;
 use pocketmine\entity\Skin;
 use pocketmine\network\mcpe\protocol\types\skin\SkinData;
 use pocketmine\network\mcpe\protocol\types\skin\SkinImage;
+use function intdiv;
 use function is_array;
 use function is_string;
 use function json_decode;
 use function json_encode;
-use function random_bytes;
 use function str_repeat;
+use function substr;
 use const JSON_THROW_ON_ERROR;
 
 class LegacySkinAdapter implements SkinAdapter{
+	/** @var \WeakMap<Skin, SkinData> */
+	private \WeakMap $networkSkins;
+
+	public function __construct(){
+		$this->networkSkins = new \WeakMap();
+	}
 
 	public function toSkinData(Skin $skin) : SkinData{
+		if(isset($this->networkSkins[$skin])){
+			return $this->networkSkins[$skin];
+		}
 		$capeData = $skin->getCapeData();
 		$capeImage = $capeData === "" ? new SkinImage(0, 0, "") : new SkinImage(32, 64, $capeData);
 		$geometryName = $skin->getGeometryName();
@@ -50,13 +60,37 @@ class LegacySkinAdapter implements SkinAdapter{
 			json_encode(["geometry" => ["default" => $geometryName]], JSON_THROW_ON_ERROR),
 			SkinImage::fromLegacy($skin->getSkinData()), [],
 			$capeImage,
-			$skin->getGeometryData()
+			$skin->getGeometryData() !== "" ? $skin->getGeometryData() : SkinData::GEOMETRY_DATA_NONE
 		);
+	}
+
+	private static function normalizeSkinImage(SkinImage $image) : string{
+		$width = $image->getWidth();
+		$height = $image->getHeight();
+		$data = $image->getData();
+		if($width !== $height || ($width !== 254 && $width !== 256)){
+			return $data;
+		}
+		$normalized = "";
+		for($y = 0; $y < 128; ++$y){
+			$sourceY = intdiv($y * $height, 128);
+			for($x = 0; $x < 128; ++$x){
+				$sourceX = intdiv($x * $width, 128);
+				$normalized .= substr($data, ($sourceY * $width + $sourceX) * 4, 4);
+			}
+		}
+		return $normalized;
 	}
 
 	public function fromSkinData(SkinData $data) : Skin{
 		if($data->isPersona()){
-			return new Skin("Standard_Custom", str_repeat(random_bytes(3) . "\xff", 4096));
+			try{
+				$skin = new Skin("Standard_Custom", self::normalizeSkinImage($data->getSkinImage()), "", "geometry.humanoid.custom", SkinData::GEOMETRY_DATA_NONE);
+			}catch(InvalidSkinException){
+				$skin = new Skin("Standard_Custom", str_repeat("\x7f\x7f\x7f\xff", 64 * 64), "", "geometry.humanoid.custom", SkinData::GEOMETRY_DATA_NONE);
+			}
+			$this->networkSkins[$skin] = $data;
+			return $skin;
 		}
 
 		$capeData = $data->isPersonaCapeOnClassic() ? "" : $data->getCapeImage()->getData();
@@ -68,6 +102,8 @@ class LegacySkinAdapter implements SkinAdapter{
 			throw new InvalidSkinException("Missing geometry name field");
 		}
 
-		return new Skin($data->getSkinId(), $data->getSkinImage()->getData(), $capeData, $geometryName, $data->getGeometryData());
+		$skin = new Skin($data->getSkinId(), self::normalizeSkinImage($data->getSkinImage()), $capeData, $geometryName, $data->getGeometryData());
+		$this->networkSkins[$skin] = $data;
+		return $skin;
 	}
 }
