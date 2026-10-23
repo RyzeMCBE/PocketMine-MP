@@ -258,12 +258,12 @@
             "source": {
                 "type": "git",
                 "url": "https://github.com/RyzeMCBE/BedrockProtocol.git",
-                "reference": "f45740483427fb9f9d03ef890488c0f6f2c49a59"
+                "reference": "73fdf6a02d9af4d923f8a532eb9bc463b2fec1dd"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/RyzeMCBE/BedrockProtocol/zipball/f45740483427fb9f9d03ef890488c0f6f2c49a59",
-                "reference": "f45740483427fb9f9d03ef890488c0f6f2c49a59",
+                "url": "https://api.github.com/repos/RyzeMCBE/BedrockProtocol/zipball/73fdf6a02d9af4d923f8a532eb9bc463b2fec1dd",
+                "reference": "73fdf6a02d9af4d923f8a532eb9bc463b2fec1dd",
                 "shasum": ""
             },
             "require": {
@@ -305,7 +305,7 @@
             "support": {
                 "source": "https://github.com/RyzeMCBE/BedrockProtocol/tree/update/bedrock-1.26.52"
             },
-            "time": "2026-10-23T22:10:35+00:00"
+            "time": "2026-10-23T22:25:50+00:00"
         },
         {
             "name": "pocketmine/binaryutils",

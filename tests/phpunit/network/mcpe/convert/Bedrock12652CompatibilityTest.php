@@ -33,6 +33,8 @@ use pocketmine\network\mcpe\handler\SessionStartPacketHandler;
 use pocketmine\network\mcpe\protocol\BiomeDefinitionListPacket;
 use pocketmine\network\mcpe\protocol\Packet;
 use pocketmine\network\mcpe\protocol\ProtocolInfo;
+use pocketmine\network\mcpe\protocol\serializer\CommonTypes;
+use pocketmine\network\mcpe\protocol\types\inventory\ItemStackWrapper;
 use pocketmine\network\mcpe\protocol\types\skin\SkinData;
 use pocketmine\network\mcpe\protocol\types\skin\SkinImage;
 use function defined;
@@ -75,7 +77,11 @@ final class Bedrock12652CompatibilityTest extends TestCase{
 			$item = $block->asItem()->setCount(3);
 			$item->setCustomName('network item');
 			$network = $converter->coreItemStackToNet($item);
-			$decoded = $converter->netItemStackToCore($network);
+			$out = new ByteBufferWriter();
+			CommonTypes::putItemStackWrapper($out, new ItemStackWrapper(1, $network));
+			$wireItem = CommonTypes::getItemStackWrapper(new ByteBufferReader($out->getData()))->getItemStack();
+			self::assertSame($network->getBlockRuntimeId(), $wireItem->getBlockRuntimeId());
+			$decoded = $converter->netItemStackToCore($wireItem);
 			self::assertTrue($item->equalsExact($decoded), $item->getName());
 		}
 	}
