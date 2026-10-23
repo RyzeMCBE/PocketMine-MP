@@ -667,11 +667,21 @@ class InGamePacketHandler extends PacketHandler{
 		return $this->player->pickEntity($packet->actorUniqueId);
 	}
 
+	public function handleServerboundLoadingScreen(\pocketmine\network\mcpe\protocol\ServerboundLoadingScreenPacket $packet) : bool{
+		$this->session->onClientLoadingScreen($packet->getLoadingScreenType(), $packet->getLoadingScreenId());
+		return true;
+	}
+
 	public function handlePlayerAction(PlayerActionPacket $packet) : bool{
 		return $this->handlePlayerActionFromData($packet->action, $packet->blockPosition, $packet->face);
 	}
 
 	private function handlePlayerActionFromData(int $action, BlockPosition $blockPosition, int $face) : bool{
+		if($action === PlayerAction::DIMENSION_CHANGE_ACK){
+			$this->session->onClientDimensionChangeAck();
+			return true;
+		}
+
 		$pos = new Vector3($blockPosition->getX(), $blockPosition->getY(), $blockPosition->getZ());
 
 		switch($action){

@@ -39,6 +39,7 @@ use pocketmine\network\mcpe\protocol\types\recipe\PotionTypeRecipe as ProtocolPo
 use pocketmine\network\mcpe\protocol\types\recipe\RecipeUnlockingRequirement;
 use pocketmine\network\mcpe\protocol\types\recipe\ShapedRecipe as ProtocolShapedRecipe;
 use pocketmine\network\mcpe\protocol\types\recipe\ShapelessRecipe as ProtocolShapelessRecipe;
+use pocketmine\network\mcpe\protocol\types\recipe\StringIdMetaItemDescriptor;
 use pocketmine\timings\Timings;
 use pocketmine\utils\AssumptionFailedError;
 use pocketmine\utils\SingletonTrait;
@@ -157,18 +158,19 @@ final class CraftingDataCache{
 			}
 		}
 
+		$itemTypeDictionary = $converter->getItemTypeDictionary();
 		$potionTypeRecipes = [];
 		foreach($manager->getPotionTypeRecipes() as $recipe){
 			$input = $converter->coreRecipeIngredientToNet($recipe->getInput())->getDescriptor();
 			$ingredient = $converter->coreRecipeIngredientToNet($recipe->getIngredient())->getDescriptor();
-			if(!$input instanceof IntIdMetaItemDescriptor || !$ingredient instanceof IntIdMetaItemDescriptor){
+			if((!$input instanceof IntIdMetaItemDescriptor && !$input instanceof StringIdMetaItemDescriptor) || (!$ingredient instanceof IntIdMetaItemDescriptor && !$ingredient instanceof StringIdMetaItemDescriptor)){
 				throw new AssumptionFailedError();
 			}
 			$output = $converter->coreItemStackToNet($recipe->getOutput());
 			$potionTypeRecipes[] = new ProtocolPotionTypeRecipe(
-				$input->getId(),
+				$input instanceof StringIdMetaItemDescriptor ? $itemTypeDictionary->fromStringId($input->getId()) : $input->getId(),
 				$input->getMeta(),
-				$ingredient->getId(),
+				$ingredient instanceof StringIdMetaItemDescriptor ? $itemTypeDictionary->fromStringId($ingredient->getId()) : $ingredient->getId(),
 				$ingredient->getMeta(),
 				$output->getId(),
 				$output->getMeta()
@@ -176,17 +178,16 @@ final class CraftingDataCache{
 		}
 
 		$potionContainerChangeRecipes = [];
-		$itemTypeDictionary = $converter->getItemTypeDictionary();
 		foreach($manager->getPotionContainerChangeRecipes() as $recipe){
 			$input = $itemTypeDictionary->fromStringId($recipe->getInputItemId());
 			$ingredient = $converter->coreRecipeIngredientToNet($recipe->getIngredient())->getDescriptor();
-			if(!$ingredient instanceof IntIdMetaItemDescriptor){
+			if(!$ingredient instanceof IntIdMetaItemDescriptor && !$ingredient instanceof StringIdMetaItemDescriptor){
 				throw new AssumptionFailedError();
 			}
 			$output = $itemTypeDictionary->fromStringId($recipe->getOutputItemId());
 			$potionContainerChangeRecipes[] = new ProtocolPotionContainerChangeRecipe(
 				$input,
-				$ingredient->getId(),
+				$ingredient instanceof StringIdMetaItemDescriptor ? $itemTypeDictionary->fromStringId($ingredient->getId()) : $ingredient->getId(),
 				$output
 			);
 		}

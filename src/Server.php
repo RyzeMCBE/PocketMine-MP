@@ -114,6 +114,7 @@ use pocketmine\utils\SignalHandler;
 use pocketmine\utils\Terminal;
 use pocketmine\utils\TextFormat;
 use pocketmine\utils\Utils;
+use pocketmine\world\dimension\DimensionManager;
 use pocketmine\world\format\io\WorldProviderManager;
 use pocketmine\world\format\io\WritableWorldProviderManagerEntry;
 use pocketmine\world\generator\Generator;
@@ -267,6 +268,7 @@ class Server{
 	private ResourcePackManager $resourceManager;
 
 	private WorldManager $worldManager;
+	private DimensionManager $dimensionManager;
 
 	private int $maxPlayers;
 
@@ -449,6 +451,10 @@ class Server{
 
 	public function getWorldManager() : WorldManager{
 		return $this->worldManager;
+	}
+
+	public function getDimensionManager() : DimensionManager{
+		return $this->dimensionManager;
 	}
 
 	public function getAsyncPool() : AsyncPool{
@@ -1045,6 +1051,7 @@ class Server{
 			}
 
 			$this->worldManager = new WorldManager($this, Path::join($this->dataPath, "worlds"), $providerManager);
+			$this->dimensionManager = new DimensionManager($this);
 			$this->worldManager->setAutoSave($this->configGroup->getConfigBool(ServerProperties::AUTO_SAVE, $this->worldManager->getAutoSave()));
 			$this->worldManager->setAutoSaveInterval($this->configGroup->getPropertyInt(Yml::TICKS_PER_AUTOSAVE, $this->worldManager->getAutoSaveInterval()));
 
@@ -1237,6 +1244,8 @@ class Server{
 			}
 			$this->worldManager->setDefaultWorld($world);
 		}
+
+		$this->dimensionManager->prepareWorlds();
 
 		return !$anyWorldFailedToLoad;
 	}
@@ -1890,6 +1899,7 @@ class Server{
 		Timings::$schedulerAsync->stopTiming();
 
 		$this->worldManager->tick($this->tickCounter);
+		$this->dimensionManager->tick();
 
 		Timings::$connection->startTiming();
 		$this->network->tick();

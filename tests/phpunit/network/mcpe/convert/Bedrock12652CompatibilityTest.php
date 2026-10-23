@@ -27,21 +27,46 @@ use PHPUnit\Framework\TestCase;
 use pmmp\encoding\ByteBufferReader;
 use pmmp\encoding\ByteBufferWriter;
 use pocketmine\block\VanillaBlocks;
+use pocketmine\crafting\CraftingManagerFromDataHelper;
 use pocketmine\data\bedrock\BedrockDataFiles;
+use pocketmine\network\mcpe\cache\CraftingDataCache;
 use pocketmine\network\mcpe\cache\StaticPacketCache;
 use pocketmine\network\mcpe\handler\SessionStartPacketHandler;
 use pocketmine\network\mcpe\protocol\BiomeDefinitionListPacket;
+use pocketmine\network\mcpe\protocol\CraftingDataPacket;
 use pocketmine\network\mcpe\protocol\Packet;
 use pocketmine\network\mcpe\protocol\ProtocolInfo;
 use pocketmine\network\mcpe\protocol\serializer\CommonTypes;
 use pocketmine\network\mcpe\protocol\types\inventory\ItemStackWrapper;
 use pocketmine\network\mcpe\protocol\types\skin\SkinData;
 use pocketmine\network\mcpe\protocol\types\skin\SkinImage;
+use pocketmine\timings\Timings;
+use function count;
 use function defined;
 use function file_get_contents;
 use function str_repeat;
 
 final class Bedrock12652CompatibilityTest extends TestCase{
+	public function testCraftingAndBrewingCacheSurvivesTheLoginPacketRoundTrip() : void{
+		Timings::init();
+		$manager = CraftingManagerFromDataHelper::make(BedrockDataFiles::RECIPES);
+		$packet = CraftingDataCache::getInstance()->getCache($manager);
+		self::assertNotEmpty($packet->recipesWithTypeIds);
+		self::assertNotEmpty($packet->potionTypeRecipes);
+		self::assertNotEmpty($packet->potionContainerRecipes);
+		self::assertCount(count($manager->getPotionTypeRecipes()), $packet->potionTypeRecipes);
+		self::assertCount(count($manager->getPotionContainerChangeRecipes()), $packet->potionContainerRecipes);
+		$out = new ByteBufferWriter();
+		$packet->encode($out);
+		$decoded = new CraftingDataPacket();
+		$reader = new ByteBufferReader($out->getData());
+		$decoded->decode($reader);
+		self::assertSame(0, $reader->getUnreadLength());
+		self::assertCount(count($packet->recipesWithTypeIds), $decoded->recipesWithTypeIds);
+		self::assertEquals($packet->potionTypeRecipes, $decoded->potionTypeRecipes);
+		self::assertEquals($packet->potionContainerRecipes, $decoded->potionContainerRecipes);
+	}
+
 	public function testOriginalSingleProtocolEntryPointsArePreserved() : void{
 		self::assertSame(2193, (new \ReflectionClass(ProtocolInfo::class))->getConstant('CURRENT_PROTOCOL'));
 		self::assertSame('1.26.52', (new \ReflectionClass(ProtocolInfo::class))->getConstant('MINECRAFT_VERSION_NETWORK'));
