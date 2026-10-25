@@ -104,12 +104,14 @@ use pocketmine\updater\UpdateChecker;
 use pocketmine\utils\AssumptionFailedError;
 use pocketmine\utils\BroadcastLoggerForwarder;
 use pocketmine\utils\Config;
+use pocketmine\utils\CpuCapacity;
 use pocketmine\utils\Filesystem;
 use pocketmine\utils\Internet;
 use pocketmine\utils\MainLogger;
 use pocketmine\utils\NotCloneable;
 use pocketmine\utils\NotSerializable;
 use pocketmine\utils\Process;
+use pocketmine\utils\RollingTimings;
 use pocketmine\utils\SignalHandler;
 use pocketmine\utils\Terminal;
 use pocketmine\utils\TextFormat;
@@ -240,6 +242,8 @@ class Server{
 	private UpdateChecker $updater;
 
 	private AsyncPool $asyncPool;
+	private int $availableCpuCores = 1;
+	private RollingTimings $tickTimings;
 
 	/** Counts the ticks since the server start */
 	private int $tickCounter = 0;
@@ -459,6 +463,15 @@ class Server{
 
 	public function getAsyncPool() : AsyncPool{
 		return $this->asyncPool;
+	}
+
+	public function getAvailableCpuCores() : int{
+		return $this->availableCpuCores;
+	}
+
+	/** @return array{count: int, mean: float, p95: float, p99: float, max: float} */
+	public function getTickTimings() : array{
+		return $this->tickTimings->summarize();
 	}
 
 	public function getTick() : int{
@@ -895,13 +908,10 @@ class Server{
 
 			$this->logger->info($this->language->translate(KnownTranslationFactory::pocketmine_server_start(TextFormat::AQUA . $this->getVersion() . TextFormat::RESET)));
 
+			$this->availableCpuCores = CpuCapacity::detect(Utils::getCoreCount());
+			$this->tickTimings = new RollingTimings();
 			if(($poolSize = $this->configGroup->getPropertyString(Yml::SETTINGS_ASYNC_WORKERS, "auto")) === "auto"){
-				$poolSize = 2;
-				$processors = Utils::getCoreCount() - 2;
-
-				if($processors > 0){
-					$poolSize = max(1, $processors);
-				}
+				$poolSize = max(1, $this->availableCpuCores - 2);
 			}else{
 				$poolSize = max(1, (int) $poolSize);
 			}
@@ -910,6 +920,7 @@ class Server{
 			$this->profilingTickRate = $this->configGroup->getPropertyInt(Yml::SETTINGS_PROFILE_REPORT_TRIGGER, self::TARGET_TICKS_PER_SECOND);
 
 			$this->asyncPool = new AsyncPool($poolSize, max(-1, $this->configGroup->getPropertyInt(Yml::MEMORY_ASYNC_WORKER_HARD_LIMIT, 256)), $this->autoloader, $this->logger, $this->tickSleeper);
+			$this->logger->debug("CPU capacity: $this->availableCpuCores logical CPUs available, $poolSize async workers");
 			$this->asyncPool->addWorkerStartHook(function(int $i) : void{
 				if(TimingsHandler::isEnabled()){
 					$this->asyncPool->submitTaskToWorker(TimingsControlTask::setEnabled(true), $i);
@@ -1950,6 +1961,7 @@ class Server{
 
 		$now = microtime(true);
 		$totalTickTimeSeconds = $now - $tickTime + ($this->tickSleeper->getNotificationProcessingTime() / 1_000_000_000);
+		$this->tickTimings->add($totalTickTimeSeconds * 1000);
 		$this->currentTPS = min(self::TARGET_TICKS_PER_SECOND, 1 / max(0.001, $totalTickTimeSeconds));
 		$this->currentUse = min(1, $totalTickTimeSeconds / self::TARGET_SECONDS_PER_TICK);
 

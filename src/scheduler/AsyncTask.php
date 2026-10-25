@@ -29,6 +29,7 @@ use pmmp\thread\ThreadSafeArray;
 use pocketmine\thread\NonThreadSafeValue;
 use pocketmine\timings\Timings;
 use function array_key_exists;
+use function hrtime;
 use function igbinary_serialize;
 use function igbinary_unserialize;
 use function is_null;
@@ -39,7 +40,7 @@ use function spl_object_id;
  * Class used to run async tasks in other threads.
  *
  * An AsyncTask is run by a thread pool of reusable threads, and doesn't have its own dedicated thread. A thread is
- * usually chosen from the pool at random to run the task (though a specific thread in the pool may be selected
+ * chosen from the pool based on its backlog (though a specific thread in the pool may be selected
  * manually, if needed).
  * Reusing threads this way has a much lower performance cost than starting an entirely new thread for every operation.
  * AsyncTasks are therefore suitable for brief CPU-bound tasks, such as world generation, compression/decompression of
@@ -77,9 +78,13 @@ abstract class AsyncTask extends Runnable{
 	private ThreadSafe|string|int|bool|null|float $result = null;
 
 	private bool $submitted = false;
+	private int $queuedAt = 0;
+	private int $startedAt = 0;
+	private int $finishedAt = 0;
 	private bool $finished = false;
 
 	public function run() : void{
+		$this->startedAt = hrtime(true);
 		$this->result = null;
 
 		$timings = Timings::getAsyncTaskRunTimings($this);
@@ -91,6 +96,7 @@ abstract class AsyncTask extends Runnable{
 			$timings->stopTiming();
 		}
 
+		$this->finishedAt = hrtime(true);
 		$this->finished = true;
 		AsyncWorker::getNotifier()->wakeupSleeper();
 		AsyncWorker::maybeCollectCycles();
@@ -101,6 +107,16 @@ abstract class AsyncTask extends Runnable{
 	 */
 	public function isCrashed() : bool{
 		return $this->isTerminated();
+	}
+
+	/** @internal */
+	public function getQueueWaitMilliseconds() : float{
+		return $this->queuedAt > 0 && $this->startedAt > 0 ? ($this->startedAt - $this->queuedAt) / 1000000 : 0.0;
+	}
+
+	/** @internal */
+	public function getRunMilliseconds() : float{
+		return $this->finishedAt > 0 ? ($this->finishedAt - $this->startedAt) / 1000000 : 0.0;
 	}
 
 	/**
@@ -144,6 +160,7 @@ abstract class AsyncTask extends Runnable{
 	}
 
 	public function setSubmitted() : void{
+		$this->queuedAt = hrtime(true);
 		$this->submitted = true;
 	}
 
