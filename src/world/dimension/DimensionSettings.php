@@ -47,7 +47,9 @@ final class DimensionSettings{
 		/** @var array<int, int|null> */
 		private array $sourceDimensions = [],
 		public readonly bool $transitionDiagnostics = false,
-		public readonly int $transitionTimeoutSeconds = 120
+		public readonly int $transitionTimeoutSeconds = 120,
+		public readonly int $portalSearchChunksPerTick = 8,
+		public readonly int $portalSearchBudgetMilliseconds = 2
 	){}
 
 	/** @param mixed[] $config */
@@ -88,10 +90,15 @@ final class DimensionSettings{
 			throw new InvalidArgumentException("dimensions.yml: portal.load-timeout-ticks must be between 20 and 12000");
 		}
 		$transitionTimeout = self::integer($portal, "transition-timeout-seconds", 120);
+		$searchChunks = self::integer($portal, "search-chunks-per-tick", 8);
+		$searchBudget = self::integer($portal, "search-budget-milliseconds", 2);
+		if($searchChunks < 1 || $searchChunks > 64 || $searchBudget < 1 || $searchBudget > 50){
+			throw new InvalidArgumentException("dimensions.yml: portal search limits must be 1..64 chunks and 1..50 milliseconds");
+		}
 		if($transitionTimeout < 10 || $transitionTimeout > 600){
 			throw new InvalidArgumentException("dimensions.yml: portal.transition-timeout-seconds must be between 10 and 600");
 		}
-		return new self($worldNames, $timeout, self::boolean($arrival, "use-world-spawn", false), $x, $y, $z, self::boolean($arrival, "create-platform", true), $sourceDimensions, self::boolean($portal, "transition-diagnostics", false), $transitionTimeout);
+		return new self($worldNames, $timeout, self::boolean($arrival, "use-world-spawn", false), $x, $y, $z, self::boolean($arrival, "create-platform", true), $sourceDimensions, self::boolean($portal, "transition-diagnostics", false), $transitionTimeout, $searchChunks, $searchBudget);
 	}
 
 	/** null means automatic detection; this is storage identity, not the client's dimension. */

@@ -30,10 +30,7 @@ use pocketmine\math\Axis;
 use pocketmine\math\Vector3;
 use pocketmine\network\mcpe\protocol\types\DimensionIds;
 use pocketmine\world\dimension\Dimensions;
-use pocketmine\world\format\Chunk;
 use pocketmine\world\World;
-use function abs;
-use function in_array;
 use function max;
 use function min;
 
@@ -55,71 +52,9 @@ final class NetherPortalLocator{
 	 * distance first, then the vertical distance to the given height.
 	 */
 	public static function findNearest(World $world, int $dimension, int $x, int $y, int $z) : ?Vector3{
-		$radius = $dimension === DimensionIds::NETHER ? self::NETHER_SEARCH_RADIUS : self::OVERWORLD_SEARCH_RADIUS;
-		$minY = max($world->getMinY(), Dimensions::getMinY($dimension));
-		$maxY = min($world->getMaxY(), Dimensions::getMaxY($dimension));
-		$ids = [
-			VanillaBlocks::NETHER_PORTAL()->setAxis(Axis::X)->getStateId(),
-			VanillaBlocks::NETHER_PORTAL()->setAxis(Axis::Z)->getStateId()
-		];
-
-		$best = null;
-		$bestHorizontal = 0;
-		$bestVertical = 0;
-		for($chunkX = ($x - $radius) >> Chunk::COORD_BIT_SIZE; $chunkX <= ($x + $radius) >> Chunk::COORD_BIT_SIZE; $chunkX++){
-			for($chunkZ = ($z - $radius) >> Chunk::COORD_BIT_SIZE; $chunkZ <= ($z + $radius) >> Chunk::COORD_BIT_SIZE; $chunkZ++){
-				$chunk = $world->loadChunk($chunkX, $chunkZ);
-				if($chunk === null){
-					continue;
-				}
-				for($subY = $minY >> Chunk::COORD_BIT_SIZE; $subY <= ($maxY - 1) >> Chunk::COORD_BIT_SIZE; $subY++){
-					$subChunk = $chunk->getSubChunk($subY);
-					$layers = $subChunk->getBlockLayers();
-					if(!isset($layers[0])){
-						continue;
-					}
-					$found = false;
-					foreach($layers[0]->getPalette() as $stateId){
-						if(in_array($stateId, $ids, true)){
-							$found = true;
-							break;
-						}
-					}
-					if(!$found){
-						continue;
-					}
-					for($lx = 0; $lx < 16; $lx++){
-						$wx = ($chunkX << Chunk::COORD_BIT_SIZE) + $lx;
-						if(abs($wx - $x) > $radius){
-							continue;
-						}
-						for($lz = 0; $lz < 16; $lz++){
-							$wz = ($chunkZ << Chunk::COORD_BIT_SIZE) + $lz;
-							if(abs($wz - $z) > $radius){
-								continue;
-							}
-							for($ly = 0; $ly < 16; $ly++){
-								$wy = ($subY << Chunk::COORD_BIT_SIZE) + $ly;
-								if($wy < $minY || $wy >= $maxY || !in_array($subChunk->getBlockStateId($lx, $ly, $lz), $ids, true)){
-									continue;
-								}
-								if($wy - 1 >= $world->getMinY() && in_array($chunk->getBlockStateId($lx, $wy - 1, $lz), $ids, true)){
-									continue;
-								}
-								$horizontal = ($wx - $x) ** 2 + ($wz - $z) ** 2;
-								$vertical = ($wy - $y) ** 2;
-								if($best === null || $horizontal < $bestHorizontal || ($horizontal === $bestHorizontal && $vertical < $bestVertical)){
-									$best = new Vector3($wx, $wy, $wz);
-									$bestHorizontal = $horizontal;
-									$bestVertical = $vertical;
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-		return $best;
+		$search = new NetherPortalSearch($world, $dimension, $x, $y, $z);
+		while(!$search->step()){}
+		return $search->getResult();
 	}
 
 	/**

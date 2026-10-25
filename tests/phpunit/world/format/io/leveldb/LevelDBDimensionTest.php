@@ -109,4 +109,33 @@ final class LevelDBDimensionTest extends TestCase{
 			self::assertSame(0, $provider->getStorageDimension());
 		}finally{ $provider->close(); }
 	}
+
+	public function testPositiveWitnessIsRecordedAndStaleWitnessFallsBackToRealData() : void{
+		$provider = new LevelDB($this->path, $this->createMock(\Logger::class));
+		$provider->saveChunk(0, 0, $this->chunk(1), Chunk::DIRTY_FLAG_BLOCKS);
+		$key = 'pocketmine:dimension-witness:v1:0';
+		self::assertSame(LevelDB::chunkIndex(0, 0) . ChunkDataKey::NEW_VERSION, $provider->getDatabase()->get($key));
+		$provider->getDatabase()->put($key, LevelDB::chunkIndex(99, 99) . ChunkDataKey::NEW_VERSION);
+		$provider->close();
+		$provider = new LevelDB($this->path, $this->createMock(\Logger::class));
+		$provider->configureDimension(0);
+		self::assertSame(0, $provider->getStorageDimension());
+		self::assertSame(LevelDB::chunkIndex(0, 0) . ChunkDataKey::NEW_VERSION, $provider->getDatabase()->get($key));
+		$provider->close();
+	}
+
+	public function testFallbackWitnessDoesNotHideANativeDimensionAddedLater() : void{
+		$provider = new LevelDB($this->path, $this->createMock(\Logger::class));
+		$provider->saveChunk(0, 0, $this->chunk(1), Chunk::DIRTY_FLAG_BLOCKS);
+		$provider->close();
+		$provider = new LevelDB($this->path, $this->createMock(\Logger::class));
+		$provider->configureDimension(1);
+		self::assertSame(0, $provider->getStorageDimension());
+		$provider->getDatabase()->put(LevelDB::chunkIndex(2, 3, 1) . ChunkDataKey::OLD_VERSION, chr(ChunkVersion::v1_0_0));
+		$provider->close();
+		$provider = new LevelDB($this->path, $this->createMock(\Logger::class));
+		$provider->configureDimension(1);
+		self::assertSame(1, $provider->getStorageDimension());
+		$provider->close();
+	}
 }

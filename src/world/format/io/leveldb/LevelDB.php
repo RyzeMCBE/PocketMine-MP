@@ -90,18 +90,36 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 	private bool $storageInUse = false;
 	private bool $dimensionConfigured = false;
 	private bool $blockStatesUpgraded = false;
+	private const DIMENSION_WITNESS_PREFIX = 'pocketmine:dimension-witness:v1:';
+	private bool $dimensionWitnessRecorded = false;
 
 	/** @internal Call before constructing World or accessing its chunks. */
 	public function configureDimension(int $target, ?int $source = null) : void{
 		if($this->storageInUse || $this->dimensionConfigured){
 			throw new \LogicException("LevelDB dimension must be selected once, before accessing chunks");
 		}
+		DimensionStorage::validate($target);
+		if($source !== null){ DimensionStorage::validate($source); }
+		$preferred = $source ?? $target;
+		$witness = $this->db->get(self::DIMENSION_WITNESS_PREFIX . $preferred);
+		// A positive witness is checked against real chunk data. Absence is never cached:
+		// an imported dimension may have been added by another tool while the world was closed.
+		if($witness !== false && DimensionStorage::versionKeyDimension($witness) === $preferred && $this->db->get($witness) !== false){
+			$this->storageDimension = $preferred;
+			$this->dimensionConfigured = $this->dimensionWitnessRecorded = true;
+			return;
+		}
 		$available = [];
 		foreach($this->db->getIterator() as $key => $_){
 			$dimension = DimensionStorage::versionKeyDimension($key);
-			if($dimension !== null){ $available[$dimension] = true; }
+			if($dimension !== null){
+				if(!isset($available[$dimension])){ $this->db->put(self::DIMENSION_WITNESS_PREFIX . $dimension, $key); }
+				$available[$dimension] = true;
+				if($dimension === $preferred){ break; }
+			}
 		}
 		$this->storageDimension = DimensionStorage::select($available, $target, $source);
+		$this->dimensionWitnessRecorded = isset($available[$this->storageDimension]);
 		$this->dimensionConfigured = true;
 	}
 
@@ -838,6 +856,10 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 		$write->delete($index . ChunkDataKey::LEGACY_TERRAIN);
 
 		$this->db->write($write);
+		if(!$this->dimensionWitnessRecorded){
+			$this->db->put(self::DIMENSION_WITNESS_PREFIX . $this->storageDimension, $index . ChunkDataKey::NEW_VERSION);
+			$this->dimensionWitnessRecorded = true;
+		}
 	}
 
 	/**

@@ -80,6 +80,10 @@ final class PortalTravelTest extends TestCase{
 	private array $loads = [];
 	/** @var list<array{int, int}> */
 	private array $loadCoordinates = [];
+	/** @var array<string, Block> */
+	private array $targetWrittenBlocks = [];
+	/** @var \Closure() : void|null */
+	private ?\Closure $onTargetWrite = null;
 
 	protected function setUp() : void{
 		try{
@@ -102,10 +106,16 @@ final class PortalTravelTest extends TestCase{
 		$this->target->method("getMaxY")->willReturn(320);
 		$this->target->method("getBlockAt")->willReturnCallback(function(int $x, int $y, int $z) : Block{
 			++$this->arrivalReads;
+			if(isset($this->targetWrittenBlocks["$x:$y:$z"])){ return clone $this->targetWrittenBlocks["$x:$y:$z"]; }
 			if($y === $this->targetFloorY || ($this->targetObstructed && $y === $this->targetFloorY + 2)){
 				return VanillaBlocks::END_STONE();
 			}
 			return $this->destinationPortal ? PortalContent::endPortal() : VanillaBlocks::AIR();
+		});
+		$this->target->method('getBlock')->willReturnCallback(fn(Vector3 $pos) : Block => $this->target->getBlockAt($pos->getFloorX(), $pos->getFloorY(), $pos->getFloorZ()));
+		$this->target->method('setBlockAt')->willReturnCallback(function(int $x, int $y, int $z, Block $block) : void{
+			$this->targetWrittenBlocks["$x:$y:$z"] = clone $block;
+			if($this->onTargetWrite !== null){ ($this->onTargetWrite)(); }
 		});
 		$this->target->method("orderChunkPopulation")->willReturnCallback(function(int $x, int $z) : Promise{
 			$resolver = new PromiseResolver();
@@ -286,6 +296,71 @@ final class PortalTravelTest extends TestCase{
 		$this->entityPosition = new Vector3(80.5, 64, -96.5);
 		$this->enterNether();
 		self::assertSame([[0, -1]], $this->loadCoordinates);
+	}
+
+	public function testAutomaticNetherSearchDefersTeleportUntilDiscoveryFinishes() : void{
+		$this->sourcePortalType = PortalType::NETHER;
+		$this->targetName = "world_nether";
+		/** @var \ArrayObject<string, bool> $teleported */
+		$teleported = new \ArrayObject(["done" => false]);
+		$this->entity->expects(self::once())->method('teleport')->willReturnCallback(static function() use(&$teleported) : bool{ $teleported['done'] = true; return true; });
+		$this->enterNether();
+		$this->resolveLoads();
+		self::assertFalse($teleported['done']);
+		for($i = 0; $i < 10; ++$i){
+			$this->travel->touchNetherPortal($this->entity);
+			$this->travel->tick();
+		}
+		self::assertTrue($teleported['done']);
+	}
+
+	public function testLeavingDuringAutomaticSearchCancelsWithoutBuildingDestination() : void{
+		$this->sourcePortalType = PortalType::NETHER;
+		$this->targetName = "world_nether";
+		$this->entity->expects(self::never())->method('teleport');
+		$this->target->expects(self::never())->method('setBlockAt');
+		$this->enterNether();
+		$this->resolveLoads();
+		$this->touching = false;
+		$this->travel->tick();
+	}
+
+	public function testSourceIsRevalidatedAfterBuildingDestination() : void{
+		$this->sourcePortalType = PortalType::NETHER;
+		$this->targetName = "world_nether";
+		$this->entity->expects(self::never())->method('teleport');
+		$this->onTargetWrite = function() : void{ $this->touching = false; };
+		$this->enterNether();
+		$this->resolveLoads();
+		for($i = 0; $i < 10; ++$i){ $this->travel->tick(); }
+	}
+
+	public function testTravellersToSameDestinationShareOneSearchBudget() : void{
+		$this->sourcePortalType = PortalType::NETHER;
+		$this->targetName = "world_nether";
+		$server = $this->source->getServer();
+		$this->travel = new PortalTravel(new Dimensions($server, [DimensionIds::NETHER => 'world_nether']), DimensionSettings::fromArray(['portal' => ['search-budget-milliseconds' => 50]]), $this->links);
+		$other = $this->createMock(Entity::class);
+		(new \ReflectionProperty(Entity::class, 'closed'))->setValue($other, true);
+		$other->method('getId')->willReturn(124);
+		$other->method('isAlive')->willReturn(true);
+		$other->method('getWorld')->willReturn($this->source);
+		$other->method('getPosition')->willReturn(new Position(0.5, 64, 0.5, $this->source));
+		$other->method('getBoundingBox')->willReturnCallback(fn() : AxisAlignedBB => $this->entity->getBoundingBox());
+		/** @var \ArrayObject<int, int> $teleports */
+		$teleports = new \ArrayObject();
+		$this->entity->expects(self::once())->method('teleport')->willReturnCallback(static function() use($teleports) : bool{ $teleports[] = 123; return true; });
+		$other->expects(self::once())->method('teleport')->willReturnCallback(static function() use($teleports) : bool{ $teleports[] = 124; return true; });
+		for($i = 0; $i < PortalTravel::NETHER_PORTAL_DELAY; ++$i){
+			$this->travel->touchNetherPortal($this->entity);
+			$this->travel->touchNetherPortal($other);
+			$this->travel->tick();
+		}
+		$this->resolveLoads();
+		$this->travel->tick();
+		self::assertSame([], $teleports->getArrayCopy());
+		$this->travel->tick();
+		self::assertSame([123, 124], $teleports->getArrayCopy());
 	}
 
 	public function testUnrelatedLinkDoesNotOverrideNormalEndArrival() : void{

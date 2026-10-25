@@ -32,18 +32,24 @@ use pocketmine\math\Vector3;
 use pocketmine\network\mcpe\protocol\types\DimensionIds;
 use pocketmine\player\Player;
 use pocketmine\promise\Promise;
+use pocketmine\utils\Utils;
 use pocketmine\world\dimension\Dimensions;
 use pocketmine\world\dimension\DimensionSettings;
 use pocketmine\world\dimension\portal\block\EndPortal;
 use pocketmine\world\format\Chunk;
 use pocketmine\world\Position;
 use pocketmine\world\World;
+use WeakReference;
 use function abs;
+use function array_key_first;
 use function array_keys;
 use function ceil;
+use function count;
 use function floor;
+use function hrtime;
 use function max;
 use function min;
+use function spl_object_id;
 use const PHP_INT_MAX;
 
 /**
@@ -83,6 +89,11 @@ final class PortalTravel{
 	private array $netherTouches = [];
 	/** @var array<int, Entity> */
 	private array $endTouches = [];
+	/** @var array<string, array{world: World, dimension: int, x: int, y: int, z: int, search: NetherPortalSearch, travellers: array<int, int>}> */
+	private array $searches = [];
+	/** @var array<string, array{world: WeakReference<World>, revision: int, portal: Vector3}> */
+	private array $destinations = [];
+	private int $searchCursor = 0;
 
 	public function __construct(
 		private Dimensions $dimensions,
@@ -110,6 +121,7 @@ final class PortalTravel{
 				unset($this->pending[$id]);
 			}
 		}
+		$this->processSearches();
 		foreach($this->netherTouches as $id => $entity){
 			if(isset($this->linkedArrivals[$id])){
 				continue;
@@ -258,16 +270,85 @@ final class PortalTravel{
 		$z = max(-self::WORLD_LIMIT, min(self::WORLD_LIMIT, $z));
 		$this->populate($entity, $target, $x, $z, true, 3, function() use($entity, $target, $to, $x, $z) : void{
 			$y = NetherPortalLocator::findBaseY($target, $to, $x, $z);
-			$portal = NetherPortalLocator::findNearest($target, $to, $x, $y, $z);
-			if($portal !== null){
-				$destination = $portal->add(0.5, 0, 0.5);
-			}else{
-				$destination = NetherPortalLocator::build($target, $x, $y, $z);
-			}
-			$this->teleport($entity, true, Position::fromObject($destination, $target), null, null, function() use($entity) : void{
-				$this->netherPortalTicks[$entity->getId()] = PHP_INT_MAX;
-			});
+			$this->startNetherSearch($entity, $target, $to, $x, $y, $z);
+		}, keepPending: true);
+	}
+
+	private function startNetherSearch(Entity $entity, World $world, int $dimension, int $x, int $y, int $z) : void{
+		$id = $entity->getId();
+		$request = $this->pending[$id] ?? null;
+		if($request === null){ return; }
+		if(!$world->isLoaded() || !$this->requestIsValid($request)){
+			unset($this->pending[$id]);
+			return;
+		}
+		$key = spl_object_id($world) . ":$dimension:$x:$y:$z";
+		$cached = $this->destinations[$key] ?? null;
+		$index = NetherPortalIndex::getInstance($world);
+		if($cached !== null && $cached['world']->get() === $world && $cached['revision'] === $index->getRevision() && $world->getBlock($cached['portal']) instanceof NetherPortal){
+			if(($this->pending[$id]['token'] ?? null) !== $request['token'] || !$this->requestIsValid($request)){ return; }
+			unset($this->pending[$id]);
+			$this->finishNetherTravel($entity, $world, $cached['portal']->add(0.5, 0, 0.5));
+			return;
+		}
+		$this->searches[$key] ??= ['world' => $world, 'dimension' => $dimension, 'x' => $x, 'y' => $y, 'z' => $z, 'search' => new NetherPortalSearch($world, $dimension, $x, $y, $z), 'travellers' => []];
+		$this->searches[$key]['travellers'][$id] = $request['token'];
+	}
+
+	private function finishNetherTravel(Entity $entity, World $world, Vector3 $destination) : void{
+		$this->teleport($entity, true, Position::fromObject($destination, $world), null, null, function() use($entity) : void{
+			$this->netherPortalTicks[$entity->getId()] = PHP_INT_MAX;
 		});
+	}
+
+	private function processSearches() : void{
+		foreach(Utils::stringifyKeys($this->searches) as $key => $job){
+			foreach($job['travellers'] as $id => $token){
+				if(($this->pending[$id]['token'] ?? null) !== $token){ unset($this->searches[$key]['travellers'][$id]); }
+			}
+			if(!$job['world']->isLoaded() || $this->searches[$key]['travellers'] === []){ unset($this->searches[$key]); }
+		}
+		$keys = array_keys($this->searches);
+		$count = count($keys);
+		if($count === 0){ return; }
+		$deadline = hrtime(true) + $this->settings->portalSearchBudgetMilliseconds * 1000000;
+		for($step = 0; $step < $this->settings->portalSearchChunksPerTick && ($step === 0 || hrtime(true) < $deadline); ++$step){
+			$key = $keys[$this->searchCursor++ % $count];
+			$job = $this->searches[$key] ?? null;
+			if($job === null){ continue; }
+			try{
+				if(!$job['search']->step()){ continue; }
+				$portal = $job['search']->getResult();
+				if($portal !== null && !$job['world']->getBlock($portal) instanceof NetherPortal){
+					$this->searches[$key]['search'] = new NetherPortalSearch($job['world'], $job['dimension'], $job['x'], $job['y'], $job['z']);
+					continue;
+				}
+				unset($this->searches[$key]);
+				if($portal !== null && $job['search']->hasCachedCoverage()){
+					if(count($this->destinations) >= 128){ unset($this->destinations[array_key_first($this->destinations)]); }
+					$this->destinations[$key] = ['world' => WeakReference::create($job['world']), 'revision' => NetherPortalIndex::getInstance($job['world'])->getRevision(), 'portal' => $portal];
+				}
+				$destination = null;
+				foreach($job['travellers'] as $id => $token){
+					$request = $this->pending[$id] ?? null;
+					if($request === null || $request['token'] !== $token || !$this->requestIsValid($request)){ continue; }
+					$destination ??= $portal?->add(0.5, 0, 0.5) ?? NetherPortalLocator::build($job['world'], $job['x'], NetherPortalLocator::findBaseY($job['world'], $job['dimension'], $job['x'], $job['z']), $job['z']);
+					$isPortal = $job['world']->isLoaded() && $job['world']->getBlock($destination) instanceof NetherPortal;
+					if(!$isPortal || ($this->pending[$id]['token'] ?? null) !== $token || !$this->requestIsValid($request)){
+						if(($this->pending[$id]['token'] ?? null) === $token){ unset($this->pending[$id]); }
+						continue;
+					}
+					unset($this->pending[$id]);
+					$this->finishNetherTravel($request['entity'], $job['world'], $destination);
+				}
+			}catch(\Throwable $e){
+				unset($this->searches[$key]);
+				foreach($job['travellers'] as $id => $token){
+					if(($this->pending[$id]['token'] ?? null) === $token){ unset($this->pending[$id]); }
+				}
+				$job['world']->getServer()->getLogger()->logException($e);
+			}
+		}
 	}
 
 	private function travelThroughEndPortal(Entity $entity) : void{
@@ -443,7 +524,7 @@ final class PortalTravel{
 	 *
 	 * @phpstan-param Closure() : void $callback
 	 */
-	private function populate(Entity $entity, World $world, int $x, int $z, bool $nether, int $radius, Closure $callback, ?PortalLink $link = null) : void{
+	private function populate(Entity $entity, World $world, int $x, int $z, bool $nether, int $radius, Closure $callback, ?PortalLink $link = null, bool $keepPending = false) : void{
 		$id = $entity->getId();
 		$token = ++$this->requestSequence;
 		$this->pending[$id] = [
@@ -463,18 +544,20 @@ final class PortalTravel{
 				}
 			}
 			Promise::all($promises)->onCompletion(
-				function() use($id, $token, $world, $callback) : void{
+				function() use($id, $token, $world, $callback, $keepPending) : void{
 					$request = $this->pending[$id] ?? null;
 					if($request === null || $request["token"] !== $token){
 						return;
 					}
-					unset($this->pending[$id]);
 					if(!$world->isLoaded() || !$this->requestIsValid($request)){
+						unset($this->pending[$id]);
 						return;
 					}
+					if(!$keepPending){ unset($this->pending[$id]); }
 					try{
 						$callback();
 					}catch(\Throwable $e){
+						if(($this->pending[$id]['token'] ?? null) === $token){ unset($this->pending[$id]); }
 						$world->getServer()->getLogger()->logException($e);
 					}
 				},

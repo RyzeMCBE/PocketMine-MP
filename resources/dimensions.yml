@@ -22,6 +22,10 @@ end:
     create-platform: true
 
 portal:
+  #Global limits for automatic Nether portal discovery, shared by all travellers.
+  #Existing portal candidates are cached and invalidated on terrain changes.
+  search-chunks-per-tick: 8
+  search-budget-milliseconds: 2
   # Cancel the portal request after this many server ticks (600 = 30s at 20 TPS).
   # This is a server-side loading deadline, not a client loading-screen timer.
   load-timeout-ticks: 600
