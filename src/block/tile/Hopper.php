@@ -103,7 +103,7 @@ class Hopper extends Spawnable implements Container, Nameable{
 
 		$pushed = false;
 		$target = $this->position->getSide($block->getFacing());
-		if($world->isChunkLoaded($target->getFloorX() >> 4, $target->getFloorZ() >> 4)){
+		if(!$this->inventory->isEmpty() && $world->isChunkLoaded($target->getFloorX() >> 4, $target->getFloorZ() >> 4)){
 			$targetTile = $world->getTile($target);
 			if($targetTile instanceof Container){
 				$pushed = HopperTransferHelper::transfer($block, $this->inventory, $targetTile->getInventory());
@@ -111,7 +111,7 @@ class Hopper extends Spawnable implements Container, Nameable{
 		}
 		$pulled = false;
 		$above = $this->position->getSide(Facing::UP);
-		if($world->isChunkLoaded($above->getFloorX() >> 4, $above->getFloorZ() >> 4)){
+		if(!$this->inventory->isFull() && $world->isChunkLoaded($above->getFloorX() >> 4, $above->getFloorZ() >> 4)){
 			$aboveTile = $world->getTile($above);
 			if($aboveTile instanceof Container){
 				$pulled = HopperTransferHelper::transfer($block, $aboveTile->getInventory(), $this->inventory);

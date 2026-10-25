@@ -157,7 +157,10 @@ class Hopper extends Transparent implements PoweredByRedstone{
 			return;
 		}
 		$tile->tickHopper($this);
-		$world->scheduleDelayedBlockUpdate($this->position, TileHopper::TRANSFER_INTERVAL_TICKS);
+		// Power changes notify neighbours and wake this block through onNearbyBlockChange().
+		if(!$powered){
+			$world->scheduleDelayedBlockUpdate($this->position, TileHopper::TRANSFER_INTERVAL_TICKS);
+		}
 	}
 
 }

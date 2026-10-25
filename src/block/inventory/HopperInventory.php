@@ -25,6 +25,7 @@ namespace pocketmine\block\inventory;
 
 use pocketmine\inventory\SimpleInventory;
 use pocketmine\world\Position;
+use function min;
 
 class HopperInventory extends SimpleInventory implements BlockInventory{
 	use BlockInventoryTrait;
@@ -32,5 +33,20 @@ class HopperInventory extends SimpleInventory implements BlockInventory{
 	public function __construct(Position $holder, int $size = 5){
 		$this->holder = $holder;
 		parent::__construct($size);
+	}
+
+	/** Avoid cloning Item/NBT objects for empty/full checks in the transfer loop. */
+	public function isEmpty() : bool{
+		foreach($this->slots as $item){
+			if($item !== null && !$item->isNull()){ return false; }
+		}
+		return true;
+	}
+
+	public function isFull() : bool{
+		foreach($this->slots as $item){
+			if($item === null || $item->isNull() || $item->getCount() < min($this->getMaxStackSize(), $item->getMaxStackSize())){ return false; }
+		}
+		return true;
 	}
 }

@@ -60,6 +60,7 @@ final class HopperTransferHelper{
 		}
 		try{
 			for($sourceSlot = 0, $size = $source->getSize(); $sourceSlot < $size; ++$sourceSlot){
+					if($source->isSlotEmpty($sourceSlot)){ continue; }
 				$originalSource = $source->getItem($sourceSlot);
 				if($originalSource->isNull() || $originalSource->getCount() < 1){
 					continue;
@@ -176,6 +177,10 @@ final class HopperTransferHelper{
 		$firstEmpty = null;
 		$max = min($item->getMaxStackSize(), $destination->getMaxStackSize());
 		for($slot = 0, $size = $destination->getSize(); $slot < $size; ++$slot){
+			if($destination->isSlotEmpty($slot)){
+				$firstEmpty ??= $slot;
+				continue;
+			}
 			$present = $destination->getItem($slot);
 			if($present->isNull()){
 				$firstEmpty ??= $slot;
