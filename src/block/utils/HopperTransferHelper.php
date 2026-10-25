@@ -1,0 +1,193 @@
+<?php
+
+/*
+ *
+ *  ____            _        _   __  __ _                  __  __ ____
+ * |  _ \ ___   ___| | _____| |_|  \/  (_)_ __   ___      |  \/  |  _ \
+ * | |_) / _ \ / __| |/ / _ \ __| |\/| | | '_ \ / _ \_____| |\/| | |_) |
+ * |  __/ (_) | (__|   <  __/ |_| |  | | | | | |  __/_____| |  | |  __/
+ * |_|   \___/ \___|_|\_\___|\__|_|  |_|_|_| |_|\___|     |_|  |_|_|
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * @author PocketMine Team
+ * @link http://www.pocketmine.net/
+ *
+ *
+ */
+
+declare(strict_types=1);
+
+namespace pocketmine\block\utils;
+
+use pocketmine\block\Hopper;
+use pocketmine\block\inventory\DoubleChestInventory;
+use pocketmine\event\inventory\HopperTransferItemEvent;
+use pocketmine\inventory\Inventory;
+use pocketmine\item\Item;
+use Throwable;
+use function array_map;
+use function array_unique;
+use function array_values;
+use function min;
+
+/**
+ * Performs synchronous, one-item container transfers. Inventories are locked
+ * during a transfer to prevent event-listener reentrancy and accidental dupes.
+ * The original source and target slots are checked again after the event.
+ */
+final class HopperTransferHelper{
+	/** @var array<int, true> */
+	private static array $busy = [];
+
+	private function __construct(){}
+
+	public static function transfer(Hopper $hopper, Inventory $source, Inventory $destination) : bool{
+		if(self::overlaps($source, $destination)){
+			return false;
+		}
+		$lockIds = self::lockIds($source, $destination);
+		foreach($lockIds as $id){
+			if(isset(self::$busy[$id])){
+				return false;
+			}
+		}
+		foreach($lockIds as $id){
+			self::$busy[$id] = true;
+		}
+		try{
+			for($sourceSlot = 0, $size = $source->getSize(); $sourceSlot < $size; ++$sourceSlot){
+					if($source->isSlotEmpty($sourceSlot)){ continue; }
+				$originalSource = $source->getItem($sourceSlot);
+				if($originalSource->isNull() || $originalSource->getCount() < 1){
+					continue;
+				}
+				$candidateSlot = self::findSlot($destination, $originalSource);
+				if($candidateSlot === null){
+					continue;
+				}
+
+				$transferItem = clone $originalSource;
+				$transferItem->setCount(1);
+				$event = new HopperTransferItemEvent(
+					$hopper, $source, $sourceSlot, $destination, $candidateSlot, $transferItem
+				);
+				$event->call();
+				if($event->isCancelled()){
+					continue;
+				}
+
+				$destinationSlot = $event->getDestinationSlot();
+				if(!$destination->slotExists($destinationSlot)){
+					continue;
+				}
+				$currentSource = $source->getItem($sourceSlot);
+				if($currentSource->isNull() || $currentSource->getCount() < 1 || !$currentSource->canStackWith($originalSource)){
+					continue;
+				}
+				$currentDestination = $destination->getItem($destinationSlot);
+				$limit = min($currentSource->getMaxStackSize(), $destination->getMaxStackSize());
+				if(!$currentDestination->isNull()){
+					if(!$currentDestination->canStackWith($currentSource)){
+						continue;
+					}
+					$limit = min($limit, $currentDestination->getMaxStackSize());
+					if($currentDestination->getCount() >= $limit){
+						continue;
+					}
+				}
+
+				$nextDestination = clone $currentSource;
+				$nextDestination->setCount(1);
+				if(!$currentDestination->isNull()){
+					$nextDestination = clone $currentDestination;
+					$nextDestination->setCount($currentDestination->getCount() + 1);
+				}
+				$nextSource = clone $currentSource;
+				$nextSource->setCount($nextSource->getCount() - 1);
+
+				// Both slot indices and stacks have been checked before changing either.
+				// Best-effort rollback protects against listeners throwing during setItem().
+				$destinationWritten = false;
+				try{
+					$destination->setItem($destinationSlot, $nextDestination);
+					$destinationWritten = true;
+					$source->setItem($sourceSlot, $nextSource);
+				}catch(Throwable $e){
+					if($destinationWritten){
+						try{
+							$destination->setItem($destinationSlot, $currentDestination);
+						}catch(Throwable){
+							// Preserve the original exception; external listeners may be broken.
+						}
+					}
+					throw $e;
+				}
+				return true;
+			}
+			return false;
+		}finally{
+			foreach($lockIds as $id){
+				unset(self::$busy[$id]);
+			}
+		}
+	}
+
+	/**
+	 * Lock both sides of paired containers, not only the double-inventory
+	 * wrapper. A listener might otherwise reenter via a single-chest alias.
+	 *
+	 * @return list<int>
+	 */
+	private static function lockIds(Inventory $source, Inventory $destination) : array{
+		$all = [$source, $destination];
+		foreach([$source, $destination] as $inventory){
+			if($inventory instanceof DoubleChestInventory){
+				$all[] = $inventory->getLeftSide();
+				$all[] = $inventory->getRightSide();
+			}
+		}
+		return array_values(array_unique(array_map(spl_object_id(...), $all)));
+	}
+
+	/**
+	 * A double chest may be exposed as a double inventory or as either half.
+	 * Such aliases must not be used as both source and destination.
+	 */
+	private static function overlaps(Inventory $a, Inventory $b) : bool{
+		if($a === $b){
+			return true;
+		}
+		$partsA = $a instanceof DoubleChestInventory ? [$a->getLeftSide(), $a->getRightSide()] : [$a];
+		$partsB = $b instanceof DoubleChestInventory ? [$b->getLeftSide(), $b->getRightSide()] : [$b];
+		foreach($partsA as $one){
+			foreach($partsB as $two){
+				if($one === $two){
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private static function findSlot(Inventory $destination, Item $item) : ?int{
+		$firstEmpty = null;
+		$max = min($item->getMaxStackSize(), $destination->getMaxStackSize());
+		for($slot = 0, $size = $destination->getSize(); $slot < $size; ++$slot){
+			if($destination->isSlotEmpty($slot)){
+				$firstEmpty ??= $slot;
+				continue;
+			}
+			$present = $destination->getItem($slot);
+			if($present->isNull()){
+				$firstEmpty ??= $slot;
+			}elseif($present->canStackWith($item) && $present->getCount() < min($max, $present->getMaxStackSize())){
+				return $slot;
+			}
+		}
+		return $firstEmpty;
+	}
+}

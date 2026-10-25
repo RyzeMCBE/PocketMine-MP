@@ -83,7 +83,6 @@ use pocketmine\Server;
 use pocketmine\ServerConfigGroup;
 use pocketmine\utils\AssumptionFailedError;
 use pocketmine\utils\Limits;
-use pocketmine\utils\ReversePriorityQueue;
 use pocketmine\utils\Utils;
 use pocketmine\world\biome\Biome;
 use pocketmine\world\biome\BiomeRegistry;
@@ -302,13 +301,7 @@ class World implements ChunkManager{
 	 */
 	private array $changedBlocks = [];
 
-	/** @phpstan-var ReversePriorityQueue<int, Vector3> */
-	private ReversePriorityQueue $scheduledBlockUpdateQueue;
-	/**
-	 * @var int[] blockHash => tick delay
-	 * @phpstan-var array<BlockPosHash, int>
-	 */
-	private array $scheduledBlockUpdateQueueIndex = [];
+	private ScheduledBlockUpdateQueue $scheduledBlockUpdateQueue;
 
 	/** @phpstan-var \SplQueue<int> */
 	private \SplQueue $neighbourBlockUpdateQueue;
@@ -329,6 +322,7 @@ class World implements ChunkManager{
 	 */
 	private array $chunkLock = [];
 	private int $maxConcurrentChunkPopulationTasks = 2;
+	private int $maxPendingGenerationTasks = 2;
 	/**
 	 * @var PromiseResolver[] chunkHash => promise
 	 * @phpstan-var array<ChunkPosHash, PromiseResolver<Chunk>>
@@ -508,13 +502,16 @@ class World implements ChunkManager{
 			generatorClass: $generator->getGeneratorClass(),
 			generatorSettings: $this->provider->getWorldData()->getGeneratorOptions()
 		);
+		$generationWorkerLimit = $this->server->getConfigGroup()->getPropertyInt(YmlServerProperties::CHUNK_GENERATION_WORKER_LIMIT, 0);
+		$generationWorkerLimit = $generationWorkerLimit > 0 ? min($this->workerPool->getSize(), $generationWorkerLimit) : max(1, $this->workerPool->getSize() - 1);
 		$this->generatorExecutor = $generator->isFast() ?
 			new SyncGeneratorExecutor($executorSetupParameters) :
 			new AsyncGeneratorExecutor(
 				$this->logger,
 				$this->workerPool,
 				$executorSetupParameters,
-				$this->worldId
+				$this->worldId,
+				$generationWorkerLimit
 			);
 
 		$this->chunkPopulationRequestQueue = new \SplQueue();
@@ -532,8 +529,7 @@ class World implements ChunkManager{
 			}
 		});
 
-		$this->scheduledBlockUpdateQueue = new ReversePriorityQueue();
-		$this->scheduledBlockUpdateQueue->setExtractFlags(\SplPriorityQueue::EXTR_BOTH);
+		$this->scheduledBlockUpdateQueue = new ScheduledBlockUpdateQueue();
 
 		$this->neighbourBlockUpdateQueue = new \SplQueue();
 
@@ -548,6 +544,8 @@ class World implements ChunkManager{
 		}
 		$this->tickedBlocksPerSubchunkPerTick = $cfg->getPropertyInt(YmlServerProperties::CHUNK_TICKING_BLOCKS_PER_SUBCHUNK_PER_TICK, self::DEFAULT_TICKED_BLOCKS_PER_SUBCHUNK_PER_TICK);
 		$this->maxConcurrentChunkPopulationTasks = $cfg->getPropertyInt(YmlServerProperties::CHUNK_GENERATION_POPULATION_QUEUE_SIZE, 2);
+		$pendingGenerationLimit = $cfg->getPropertyInt(YmlServerProperties::CHUNK_GENERATION_MAX_PENDING_TASKS, 0);
+		$this->maxPendingGenerationTasks = max(1, $pendingGenerationLimit > 0 ? $pendingGenerationLimit : $this->workerPool->getSize() * 2);
 
 		$this->initRandomTickBlocksFromConfig($cfg);
 
@@ -953,10 +951,7 @@ class World implements ChunkManager{
 
 		$this->timings->scheduledBlockUpdates->startTiming();
 		//Delayed updates
-		while($this->scheduledBlockUpdateQueue->count() > 0 && $this->scheduledBlockUpdateQueue->current()["priority"] <= $currentTick){
-			/** @var Vector3 $vec */
-			$vec = $this->scheduledBlockUpdateQueue->extract()["data"];
-			unset($this->scheduledBlockUpdateQueueIndex[World::blockHash($vec->x, $vec->y, $vec->z)]);
+		while(($vec = $this->scheduledBlockUpdateQueue->fetchReady($currentTick)) !== null){
 			if(!$this->isInLoadedTerrain($vec)){
 				continue;
 			}
@@ -1447,18 +1442,49 @@ class World implements ChunkManager{
 		$this->timings->syncChunkSave->startTiming();
 		try{
 			foreach($this->chunks as $chunkHash => $chunk){
-				self::getXZ($chunkHash, $chunkX, $chunkZ);
-				$this->provider->saveChunk($chunkX, $chunkZ, new ChunkData(
-					$chunk->getSubChunks(),
-					$chunk->isPopulated(),
-					array_map(fn(Entity $e) => $e->saveNBT(), array_values(array_filter($this->getChunkEntities($chunkX, $chunkZ), fn(Entity $e) => $e->canSaveWithChunk()))),
-					array_map(fn(Tile $t) => $t->saveNBT(), array_values($chunk->getTiles())),
-				), $chunk->getTerrainDirtyFlags());
-				$chunk->clearTerrainDirtyFlags();
+				$this->saveChunkData($chunkHash, $chunk);
 			}
 		}finally{
 			$this->timings->syncChunkSave->stopTiming();
 		}
+	}
+
+	private function saveChunkData(int $chunkHash, Chunk $chunk) : void{
+		self::getXZ($chunkHash, $chunkX, $chunkZ);
+		$this->provider->saveChunk($chunkX, $chunkZ, new ChunkData(
+			$chunk->getSubChunks(),
+			$chunk->isPopulated(),
+			array_map(fn(Entity $e) => $e->saveNBT(), array_values(array_filter($this->getChunkEntities($chunkX, $chunkZ), fn(Entity $e) => $e->canSaveWithChunk()))),
+			array_map(fn(Tile $t) => $t->saveNBT(), array_values($chunk->getTiles()))
+		), $chunk->getTerrainDirtyFlags());
+		$chunk->clearTerrainDirtyFlags();
+	}
+
+	/**
+	 * @internal Autosave only; explicit save()/saveChunks() and unload remain synchronous.
+	 * @return \Generator<int, \Closure() : void, void, void>
+	 */
+	public function createIncrementalSaveTasks() : \Generator{
+		if(!$this->isLoaded() || !$this->getAutoSave()){ return; }
+		yield function() : void{
+			if($this->isLoaded() && $this->getAutoSave()){ (new WorldSaveEvent($this))->call(); }
+		};
+		if(!$this->isLoaded() || !$this->getAutoSave()){ return; }
+		foreach(array_keys($this->chunks) as $hash){
+			yield function() use($hash) : void{
+				if($this->unloaded || !$this->getAutoSave()){ return; }
+				$chunk = $this->chunks[$hash] ?? null;
+				if($chunk !== null){
+					$this->timings->syncChunkSave->time(fn() => $this->saveChunkData($hash, $chunk));
+				}
+			};
+		}
+		yield function() : void{
+			if(!$this->unloaded && $this->getAutoSave()){
+				$this->provider->getWorldData()->setTime($this->time);
+				$this->provider->getWorldData()->save();
+			}
+		};
 	}
 
 	/**
@@ -1466,14 +1492,10 @@ class World implements ChunkManager{
 	 * Blocks will be updated with the scheduled update type.
 	 */
 	public function scheduleDelayedBlockUpdate(Vector3 $pos, int $delay) : void{
-		if(
-			!$this->isInWorld($pos->x, $pos->y, $pos->z) ||
-			(isset($this->scheduledBlockUpdateQueueIndex[$index = World::blockHash($pos->x, $pos->y, $pos->z)]) && $this->scheduledBlockUpdateQueueIndex[$index] <= $delay)
-		){
+		if(!$this->isInWorld($pos->x, $pos->y, $pos->z)){
 			return;
 		}
-		$this->scheduledBlockUpdateQueueIndex[$index] = $delay;
-		$this->scheduledBlockUpdateQueue->insert(new Vector3((int) $pos->x, (int) $pos->y, (int) $pos->z), $delay + $this->server->getTick());
+		$this->scheduledBlockUpdateQueue->schedule($pos, $delay + $this->server->getTick());
 	}
 
 	private function tryAddToNeighbourUpdateQueue(int $x, int $y, int $z) : void{
@@ -3378,19 +3400,26 @@ class World implements ChunkManager{
 		return $resolver->getPromise();
 	}
 
-	private function drainPopulationRequestQueue() : void{
+	private function hasGenerationCapacity() : bool{
+		return array_sum($this->workerPool->getTaskQueueSizes()) < $this->maxPendingGenerationTasks;
+	}
+
+	/** @internal Cooperatively admit requests across worlds sharing the worker pool. */
+	public function processQueuedChunkGeneration(int $maximumRequests = 1) : int{
+		if($this->unloaded){ return 0; }
 		$failed = [];
-		while(count($this->activeChunkPopulationTasks) < $this->maxConcurrentChunkPopulationTasks && !$this->chunkPopulationRequestQueue->isEmpty()){
+		$processed = 0;
+		$started = 0;
+		while($processed++ < $maximumRequests && count($this->activeChunkPopulationTasks) < $this->maxConcurrentChunkPopulationTasks && !$this->chunkPopulationRequestQueue->isEmpty() && $this->hasGenerationCapacity()){
 			$nextChunkHash = $this->chunkPopulationRequestQueue->dequeue();
 			unset($this->chunkPopulationRequestQueueIndex[$nextChunkHash]);
 			World::getXZ($nextChunkHash, $nextChunkX, $nextChunkZ);
 			if(isset($this->chunkPopulationRequestMap[$nextChunkHash])){
 				assert(!($this->activeChunkPopulationTasks[$nextChunkHash] ?? false), "Population for chunk $nextChunkX $nextChunkZ already running");
-				if(
-					!$this->orderChunkPopulation($nextChunkX, $nextChunkZ, null)->isResolved() &&
-					!isset($this->activeChunkPopulationTasks[$nextChunkHash])
-				){
+				if(!$this->orderChunkPopulation($nextChunkX, $nextChunkZ, null)->isResolved() && !isset($this->activeChunkPopulationTasks[$nextChunkHash])){
 					$failed[] = $nextChunkHash;
+				}else{
+					++$started;
 				}
 			}
 		}
@@ -3400,6 +3429,7 @@ class World implements ChunkManager{
 		foreach($failed as $hash){
 			$this->addChunkHashToPopulationRequestQueue($hash);
 		}
+		return $started;
 	}
 
 	/**
@@ -3477,6 +3507,9 @@ class World implements ChunkManager{
 	 * @phpstan-return Promise<Chunk>
 	 */
 	private function internalOrderChunkPopulation(int $chunkX, int $chunkZ, ?ChunkLoader $associatedChunkLoader, ?PromiseResolver $resolver) : Promise{
+		if(!$this->hasGenerationCapacity()){
+			return $resolver?->getPromise() ?? $this->enqueuePopulationRequest($chunkX, $chunkZ, $associatedChunkLoader);
+		}
 		$chunkHash = World::chunkHash($chunkX, $chunkZ);
 
 		$timings = $this->timings->chunkPopulationOrder;
@@ -3575,6 +3608,8 @@ class World implements ChunkManager{
 						(new ChunkPopulateEvent($this, $x, $z, $chunk))->call();
 					}
 
+					$this->server->getDimensionManager()->onChunkPopulated($this, $x, $z);
+
 					foreach($this->getChunkListeners($x, $z) as $listener){
 						$listener->onChunkPopulated($x, $z, $chunk);
 					}
@@ -3607,7 +3642,7 @@ class World implements ChunkManager{
 				$this->addChunkHashToPopulationRequestQueue($index);
 			}
 
-			$this->drainPopulationRequestQueue();
+			$this->server->getWorldManager()->processChunkGenerationQueues();
 		}
 		$timings->stopTiming();
 	}

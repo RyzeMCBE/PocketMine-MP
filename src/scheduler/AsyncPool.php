@@ -30,12 +30,15 @@ use pocketmine\thread\ThreadCrashException;
 use pocketmine\thread\ThreadSafeClassLoader;
 use pocketmine\timings\Timings;
 use pocketmine\utils\AssumptionFailedError;
+use pocketmine\utils\RollingTimings;
 use pocketmine\utils\Utils;
 use function array_keys;
 use function array_map;
 use function assert;
-use function count;
 use function get_class;
+use function hrtime;
+use function max;
+use function min;
 use function spl_object_id;
 use function time;
 use const PHP_INT_MAX;
@@ -58,6 +61,9 @@ class AsyncPool{
 	 * @phpstan-var (\Closure(int $workerId) : void)[]
 	 */
 	private array $workerStartHooks = [];
+	private RollingTimings $queueWaitTimings;
+	private RollingTimings $runTimings;
+	private RollingTimings $completionTimings;
 
 	public function __construct(
 		protected int $size,
@@ -65,7 +71,11 @@ class AsyncPool{
 		private ThreadSafeClassLoader $classLoader,
 		private ThreadSafeLogger $logger,
 		private SleeperHandler $eventLoop
-	){}
+	){
+		$this->queueWaitTimings = new RollingTimings();
+		$this->runTimings = new RollingTimings();
+		$this->completionTimings = new RollingTimings();
+	}
 
 	/**
 	 * Returns the maximum size of the pool. Note that there may be less active workers than this number.
@@ -164,9 +174,16 @@ class AsyncPool{
 	 * - else, the worker with the smallest backlog is chosen.
 	 */
 	public function selectWorker() : int{
+		return $this->selectWorkerWithLimit($this->size);
+	}
+
+	/** @internal Restrict core generation to a subset, reserving capacity for packet work. */
+	public function selectWorkerWithLimit(int $workerLimit) : int{
+		$limit = min($this->size, max(1, $workerLimit));
 		$worker = null;
 		$minUsage = PHP_INT_MAX;
 		foreach($this->workers as $i => $entry){
+			if($i >= $limit){ continue; }
 			if(($usage = $entry->tasks->count()) < $minUsage){
 				$worker = $i;
 				$minUsage = $usage;
@@ -175,9 +192,9 @@ class AsyncPool{
 				}
 			}
 		}
-		if($worker === null || ($minUsage > 0 && count($this->workers) < $this->size)){
+		if($worker === null || $minUsage > 0){
 			//select a worker to start on the fly
-			for($i = 0; $i < $this->size; ++$i){
+			for($i = 0; $i < $limit; ++$i){
 				if(!isset($this->workers[$i])){
 					$worker = $i;
 					break;
@@ -276,9 +293,13 @@ class AsyncPool{
 					 * been consumed before completing.
 					 */
 					$this->checkTaskProgressUpdates($task);
+						$this->queueWaitTimings->add($task->getQueueWaitMilliseconds());
+						$this->runTimings->add($task->getRunMilliseconds());
+						$completionStart = hrtime(true);
 					Timings::getAsyncTaskCompletionTimings($task)->time(function() use ($task) : void{
 						$task->onCompletion();
 					});
+						$this->completionTimings->add((hrtime(true) - $completionStart) / 1000000);
 				}
 			}else{
 				$this->checkTaskProgressUpdates($task);
@@ -298,6 +319,15 @@ class AsyncPool{
 	 */
 	public function getTaskQueueSizes() : array{
 		return array_map(function(AsyncPoolWorkerEntry $entry) : int{ return $entry->tasks->count(); }, $this->workers);
+	}
+
+	/** @return array{waitP95: float, runP95: float, completionP95: float} */
+	public function getTimingDiagnostics() : array{
+		return [
+			'waitP95' => $this->queueWaitTimings->summarize()['p95'],
+			'runP95' => $this->runTimings->summarize()['p95'],
+			'completionP95' => $this->completionTimings->summarize()['p95']
+		];
 	}
 
 	public function shutdownUnusedWorkers() : int{

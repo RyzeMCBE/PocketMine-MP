@@ -1,3 +1,9 @@
+> Este fork incorpora soporte para Minecraft Bedrock **1.26.52** (protocolo **2193**) conservando la arquitectura original de PocketMine-MP. Composer instala los forks de BedrockProtocol y BedrockData de RyzeMCBE en las revisiones fijadas por el proyecto.
+
+Incluye dimensiones Nether y End con sus generadores, portales y selección del almacenamiento de mapas importados mediante `dimensions.yml`. Por defecto utiliza las carpetas `world_nether` y `world_the_end`, igual que la referencia RyzeMP. Añade el dispensador como contenedor de nueve espacios y las tolvas con transferencias automáticas, recogida de objetos, enfriamiento persistente y bloqueo por fuentes directas de redstone. El dispensador conserva el comportamiento de RyzeMP: todavía no dispara objetos mediante redstone.
+
+Las mejoras de rendimiento incluyen actualizaciones de bloques sin cadenas duplicadas, descubrimiento progresivo de portales, autoguardado incremental, detección de CPU asignada y generación regulada entre mundos. `/status` muestra percentiles del tick y tiempos de los trabajadores. Consulta [PERFORMANCE.md](PERFORMANCE.md) para configurar y medir estos cambios.
+
 # End of support announcement
 
 Hello all,

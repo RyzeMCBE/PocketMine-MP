@@ -39,6 +39,9 @@ final class YmlServerProperties{
 	public const ANONYMOUS_STATISTICS = 'anonymous-statistics';
 	public const ANONYMOUS_STATISTICS_ENABLED = 'anonymous-statistics.enabled';
 	public const ANONYMOUS_STATISTICS_HOST = 'anonymous-statistics.host';
+	public const AUTOSAVE = 'autosave';
+	public const AUTOSAVE_MAX_MILLISECONDS_PER_TICK = 'autosave.max-milliseconds-per-tick';
+	public const AUTOSAVE_MAX_TASKS_PER_TICK = 'autosave.max-tasks-per-tick';
 	public const AUTO_REPORT = 'auto-report';
 	public const AUTO_REPORT_ENABLED = 'auto-report.enabled';
 	public const AUTO_REPORT_HOST = 'auto-report.host';
@@ -54,7 +57,9 @@ final class YmlServerProperties{
 	public const AUTO_UPDATER_PREFERRED_CHANNEL = 'auto-updater.preferred-channel';
 	public const AUTO_UPDATER_SUGGEST_CHANNELS = 'auto-updater.suggest-channels';
 	public const CHUNK_GENERATION = 'chunk-generation';
+	public const CHUNK_GENERATION_MAX_PENDING_TASKS = 'chunk-generation.max-pending-tasks';
 	public const CHUNK_GENERATION_POPULATION_QUEUE_SIZE = 'chunk-generation.population-queue-size';
+	public const CHUNK_GENERATION_WORKER_LIMIT = 'chunk-generation.worker-limit';
 	public const CHUNK_SENDING = 'chunk-sending';
 	public const CHUNK_SENDING_PER_TICK = 'chunk-sending.per-tick';
 	public const CHUNK_SENDING_SPAWN_RADIUS = 'chunk-sending.spawn-radius';

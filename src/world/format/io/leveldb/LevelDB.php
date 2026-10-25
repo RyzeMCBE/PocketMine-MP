@@ -66,7 +66,6 @@ use function is_dir;
 use function mkdir;
 use function ord;
 use function str_repeat;
-use function strlen;
 use function substr;
 use function trim;
 use function unpack;
@@ -86,6 +85,47 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 	private const CAVES_CLIFFS_EXPERIMENTAL_SUBCHUNK_KEY_OFFSET = 4;
 
 	protected \LevelDB $db;
+
+	private int $storageDimension = 0;
+	private bool $storageInUse = false;
+	private bool $dimensionConfigured = false;
+	private bool $blockStatesUpgraded = false;
+	private const DIMENSION_WITNESS_PREFIX = 'pocketmine:dimension-witness:v1:';
+	private bool $dimensionWitnessRecorded = false;
+
+	/** @internal Call before constructing World or accessing its chunks. */
+	public function configureDimension(int $target, ?int $source = null) : void{
+		if($this->storageInUse || $this->dimensionConfigured){
+			throw new \LogicException("LevelDB dimension must be selected once, before accessing chunks");
+		}
+		DimensionStorage::validate($target);
+		if($source !== null){ DimensionStorage::validate($source); }
+		$preferred = $source ?? $target;
+		$witness = $this->db->get(self::DIMENSION_WITNESS_PREFIX . $preferred);
+		// A positive witness is checked against real chunk data. Absence is never cached:
+		// an imported dimension may have been added by another tool while the world was closed.
+		if($witness !== false && DimensionStorage::versionKeyDimension($witness) === $preferred && $this->db->get($witness) !== false){
+			$this->storageDimension = $preferred;
+			$this->dimensionConfigured = $this->dimensionWitnessRecorded = true;
+			return;
+		}
+		$available = [];
+		foreach($this->db->getIterator() as $key => $_){
+			$dimension = DimensionStorage::versionKeyDimension($key);
+			if($dimension !== null){
+				if(!isset($available[$dimension])){ $this->db->put(self::DIMENSION_WITNESS_PREFIX . $dimension, $key); }
+				$available[$dimension] = true;
+				if($dimension === $preferred){ break; }
+			}
+		}
+		$this->storageDimension = DimensionStorage::select($available, $target, $source);
+		$this->dimensionWitnessRecorded = isset($available[$this->storageDimension]);
+		$this->dimensionConfigured = true;
+	}
+
+	public function getStorageDimension() : int{
+		return $this->storageDimension;
+	}
 
 	private static function checkForLevelDBExtension() : void{
 		if(!extension_loaded('leveldb')){
@@ -211,7 +251,9 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 				continue;
 			}
 			try{
-				$palette[] = $this->blockStateDeserializer->deserialize($blockStateData);
+				$normalized = ImportedBlockStateNormalizer::normalize($blockStateData);
+				$palette[] = $this->blockStateDeserializer->deserialize($normalized);
+				$this->blockStatesUpgraded = $this->blockStatesUpgraded || $normalized !== $blockStateData;
 			}catch(UnsupportedBlockStateException $e){
 				$blockDecodeErrors[$e->getMessage()][] = $i;
 				$palette[] = $this->blockStateDeserializer->deserialize(GlobalBlockStateHandlers::getUnknownBlockStateData());
@@ -302,12 +344,12 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 	 * @return PalettedBlockArray[]
 	 * @phpstan-return array<int, PalettedBlockArray>
 	 */
-	private static function deserialize3dBiomes(BinaryStream $stream, int $chunkVersion, \Logger $logger) : array{
+	private function deserialize3dBiomes(BinaryStream $stream, int $chunkVersion, \Logger $logger) : array{
 		$previous = null;
 		$result = [];
-		$nextIndex = Chunk::MIN_SUBCHUNK_INDEX;
-
-		$expectedCount = self::getExpected3dBiomesCount($chunkVersion);
+		$nextIndex = $this->storageDimension === 0 ? Chunk::MIN_SUBCHUNK_INDEX : 0;
+		$lastIndex = $this->storageDimension === 0 ? Chunk::MAX_SUBCHUNK_INDEX : ($this->storageDimension === 1 ? 7 : 15);
+		$expectedCount = $this->storageDimension === 0 ? self::getExpected3dBiomesCount($chunkVersion) : $lastIndex + 1;
 		for($i = 0; $i < $expectedCount; ++$i){
 			try{
 				$bitsPerBlock = $stream->getByte() >> 1;
@@ -320,7 +362,7 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 					$decoded = self::deserializeBiomePalette($stream, $bitsPerBlock);
 				}
 				$previous = $decoded;
-				if($nextIndex <= Chunk::MAX_SUBCHUNK_INDEX){ //older versions wrote additional superfluous biome palettes
+				if($nextIndex <= $lastIndex){ //older versions wrote additional superfluous biome palettes
 					$result[$nextIndex++] = $decoded;
 				}elseif($stream->feof()){
 					//not enough padding biome arrays for the given version - this is non-critical since we discard the excess anyway, but this should be logged
@@ -336,15 +378,22 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 			$logger->error("Unexpected trailing data after 3D biomes data");
 		}
 
+		// Chunk has a fixed server-side height even when native storage has only 8/16 palettes.
+		if($this->storageDimension !== 0){
+			for($y = Chunk::MIN_SUBCHUNK_INDEX; $y <= Chunk::MAX_SUBCHUNK_INDEX; ++$y){
+				if(!isset($result[$y])){ $result[$y] = clone $result[$y < 0 ? 0 : $lastIndex]; }
+			}
+		}
 		return $result;
 	}
 
 	/**
 	 * @param SubChunk[] $subChunks
 	 */
-	private static function serialize3dBiomes(BinaryStream $stream, array $subChunks) : void{
-		//TODO: the server-side min/max may not coincide with the world storage min/max - we may need additional logic to handle this
-		for($y = Chunk::MIN_SUBCHUNK_INDEX; $y <= Chunk::MAX_SUBCHUNK_INDEX; $y++){
+	private function serialize3dBiomes(BinaryStream $stream, array $subChunks) : void{
+		$min = $this->storageDimension === 0 ? Chunk::MIN_SUBCHUNK_INDEX : 0;
+		$max = $this->storageDimension === 0 ? Chunk::MAX_SUBCHUNK_INDEX : ($this->storageDimension === 1 ? 7 : 15);
+		for($y = $min; $y <= $max; $y++){
 			//TODO: is it worth trying to use the previous palette if it's the same as the current one? vanilla supports
 			//this, but it's not clear if it's worth the effort to implement.
 			self::serializeBiomePalette($stream, $subChunks[$y]->getBiomeArray());
@@ -413,7 +462,7 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 	}
 
 	private function readVersion(int $chunkX, int $chunkZ) : ?int{
-		$index = self::chunkIndex($chunkX, $chunkZ);
+		$index = self::chunkIndex($chunkX, $chunkZ, $this->storageDimension);
 		$chunkVersionRaw = $this->db->get($index . ChunkDataKey::NEW_VERSION);
 		if($chunkVersionRaw === false){
 			$chunkVersionRaw = $this->db->get($index . ChunkDataKey::OLD_VERSION);
@@ -572,7 +621,7 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 	private function deserializeAllSubChunkData(string $index, int $chunkVersion, bool &$hasBeenUpgraded, array $convertedLegacyExtraData, array $biomeArrays, \Logger $logger) : array{
 		$subChunks = [];
 
-		$subChunkKeyOffset = self::hasOffsetCavesAndCliffsSubChunks($chunkVersion) ? self::CAVES_CLIFFS_EXPERIMENTAL_SUBCHUNK_KEY_OFFSET : 0;
+		$subChunkKeyOffset = $this->storageDimension === 0 && self::hasOffsetCavesAndCliffsSubChunks($chunkVersion) ? self::CAVES_CLIFFS_EXPERIMENTAL_SUBCHUNK_KEY_OFFSET : 0;
 		for($y = Chunk::MIN_SUBCHUNK_INDEX; $y <= Chunk::MAX_SUBCHUNK_INDEX; ++$y){
 			if(($data = $this->db->get($index . ChunkDataKey::SUBCHUNK . chr(($y + $subChunkKeyOffset) & 0xff))) === false){
 				$subChunks[$y] = new SubChunk(Block::EMPTY_STATE_ID, [], $biomeArrays[$y]);
@@ -629,7 +678,7 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 
 			try{
 				$binaryStream->get(512);
-				$biomeArrays = self::deserialize3dBiomes($binaryStream, $chunkVersion, $logger);
+				$biomeArrays = $this->deserialize3dBiomes($binaryStream, $chunkVersion, $logger);
 			}catch(BinaryDataException $e){
 				throw new CorruptedChunkException($e->getMessage(), 0, $e);
 			}
@@ -647,7 +696,9 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 	 * @throws CorruptedChunkException
 	 */
 	public function loadChunk(int $chunkX, int $chunkZ) : ?LoadedChunkData{
-		$index = LevelDB::chunkIndex($chunkX, $chunkZ);
+		$this->storageInUse = true;
+		$this->blockStatesUpgraded = false;
+		$index = self::chunkIndex($chunkX, $chunkZ, $this->storageDimension);
 
 		$chunkVersion = $this->readVersion($chunkX, $chunkZ);
 		if($chunkVersion === null){
@@ -750,13 +801,14 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 
 		return new LoadedChunkData(
 			data: new ChunkData($subChunks, $terrainPopulated, $entities, $tiles),
-			upgraded: $hasBeenUpgraded,
+			upgraded: $hasBeenUpgraded || $this->wereBlockStatesUpgraded(),
 			fixerFlags: LoadedChunkData::FIXER_FLAG_ALL //TODO: fill this by version rather than just setting all flags
 		);
 	}
 
 	public function saveChunk(int $chunkX, int $chunkZ, ChunkData $chunkData, int $dirtyFlags) : void{
-		$index = LevelDB::chunkIndex($chunkX, $chunkZ);
+		$this->storageInUse = true;
+		$index = self::chunkIndex($chunkX, $chunkZ, $this->storageDimension);
 
 		$write = new \LevelDBWriteBatch();
 
@@ -790,7 +842,7 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 			$write->delete($index . ChunkDataKey::HEIGHTMAP_AND_2D_BIOMES);
 			$stream = new BinaryStream();
 			$stream->put(str_repeat("\x00", 512)); //fake heightmap
-			self::serialize3dBiomes($stream, $subChunks);
+			$this->serialize3dBiomes($stream, $subChunks);
 			$write->put($index . ChunkDataKey::HEIGHTMAP_AND_3D_BIOMES, $stream->getBuffer());
 		}
 
@@ -804,6 +856,10 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 		$write->delete($index . ChunkDataKey::LEGACY_TERRAIN);
 
 		$this->db->write($write);
+		if(!$this->dimensionWitnessRecorded){
+			$this->db->put(self::DIMENSION_WITNESS_PREFIX . $this->storageDimension, $index . ChunkDataKey::NEW_VERSION);
+			$this->dimensionWitnessRecorded = true;
+		}
 	}
 
 	/**
@@ -822,8 +878,8 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 		return $this->db;
 	}
 
-	public static function chunkIndex(int $chunkX, int $chunkZ) : string{
-		return Binary::writeLInt($chunkX) . Binary::writeLInt($chunkZ);
+	public static function chunkIndex(int $chunkX, int $chunkZ, int $dimension = 0) : string{
+		return DimensionStorage::chunkIndex($chunkX, $chunkZ, $dimension);
 	}
 
 	public function doGarbageCollection() : void{
@@ -835,8 +891,12 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 	}
 
 	public function getAllChunks(bool $skipCorrupted = false, ?\Logger $logger = null) : \Generator{
+		$this->storageInUse = true;
+		$seen = [];
 		foreach($this->db->getIterator() as $key => $_){
-			if(strlen($key) === 9 && ($key[8] === ChunkDataKey::NEW_VERSION || $key[8] === ChunkDataKey::OLD_VERSION)){
+			$coordinates = substr($key, 0, 8);
+			if(DimensionStorage::versionKeyDimension($key) === $this->storageDimension && !isset($seen[$coordinates])){
+				$seen[$coordinates] = true;
 				$chunkX = Binary::readLInt(substr($key, 0, 4));
 				$chunkZ = Binary::readLInt(substr($key, 4, 4));
 				try{
@@ -857,11 +917,19 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 
 	public function calculateChunkCount() : int{
 		$count = 0;
+		$this->storageInUse = true;
+		$seen = [];
 		foreach($this->db->getIterator() as $key => $_){
-			if(strlen($key) === 9 && ($key[8] === ChunkDataKey::NEW_VERSION || $key[8] === ChunkDataKey::OLD_VERSION)){
+			$coordinates = substr($key, 0, 8);
+			if(DimensionStorage::versionKeyDimension($key) === $this->storageDimension && !isset($seen[$coordinates])){
+				$seen[$coordinates] = true;
 				$count++;
 			}
 		}
 		return $count;
 	}
+	private function wereBlockStatesUpgraded() : bool{
+		return $this->blockStatesUpgraded;
+	}
+
 }

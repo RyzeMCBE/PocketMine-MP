@@ -115,7 +115,6 @@ use pocketmine\network\mcpe\protocol\AnimatePacket;
 use pocketmine\network\mcpe\protocol\MovePlayerPacket;
 use pocketmine\network\mcpe\protocol\SetActorMotionPacket;
 use pocketmine\network\mcpe\protocol\types\BlockPosition;
-use pocketmine\network\mcpe\protocol\types\DimensionIds;
 use pocketmine\network\mcpe\protocol\types\entity\EntityMetadataCollection;
 use pocketmine\network\mcpe\protocol\types\entity\EntityMetadataFlags;
 use pocketmine\network\mcpe\protocol\types\entity\EntityMetadataProperties;
@@ -148,6 +147,7 @@ use Ramsey\Uuid\UuidInterface;
 use function abs;
 use function array_filter;
 use function array_shift;
+use function asort;
 use function assert;
 use function count;
 use function explode;
@@ -168,6 +168,7 @@ use function trim;
 use const M_PI;
 use const M_SQRT3;
 use const PHP_INT_MAX;
+use const SORT_NUMERIC;
 
 /**
  * Main class that handles networking, recovery, and packet sending to the server part
@@ -863,7 +864,15 @@ class Player extends Human implements CommandSender, ChunkListener, IPlayer, Nev
 		$world = $this->getWorld();
 
 		$limit = $this->chunksPerTick - count($this->activeChunkGenerationRequests);
-		foreach($this->loadQueue as $index => $distance){
+		$priority = [];
+		foreach($this->getNetworkSession()->getDimensionArrivalChunks() as $hash => $_){
+			if(isset($this->loadQueue[$hash])){
+				$priority[$hash] = $this->loadQueue[$hash];
+			}
+		}
+		asort($priority, SORT_NUMERIC);
+		// Keep the configured per-tick and in-flight limits; never add unrequested chunks.
+		foreach($priority + $this->loadQueue as $index => $distance){
 			if($count >= $limit){
 				break;
 			}
@@ -897,7 +906,8 @@ class Player extends Human implements CommandSender, ChunkListener, IPlayer, Nev
 					unset($this->activeChunkGenerationRequests[$index]);
 					$this->usedChunks[$index] = UsedChunkStatus::REQUESTED_SENDING;
 
-					$this->getNetworkSession()->startUsingChunk($X, $Z, function() use ($X, $Z, $index) : void{
+					$this->getNetworkSession()->startUsingChunk($X, $Z, function() use ($X, $Z, $index, $world) : void{
+						if($world !== $this->getWorld() || ($this->usedChunks[$index] ?? null) !== UsedChunkStatus::REQUESTED_SENDING){ return; }
 						$this->usedChunks[$index] = UsedChunkStatus::SENT;
 						if($this->spawnChunkLoadCount === -1){
 							$this->spawnEntitiesOnChunk($X, $Z);
@@ -2674,12 +2684,12 @@ class Player extends Human implements CommandSender, ChunkListener, IPlayer, Nev
 
 		if($this->deathPosition !== null && $this->deathPosition->world === $this->location->world){
 			$properties->setBlockPos(EntityMetadataProperties::PLAYER_DEATH_POSITION, BlockPosition::fromVector3($this->deathPosition));
-			//TODO: this should be updated when dimensions are implemented
-			$properties->setInt(EntityMetadataProperties::PLAYER_DEATH_DIMENSION, DimensionIds::OVERWORLD);
+
+			$properties->setInt(EntityMetadataProperties::PLAYER_DEATH_DIMENSION, $this->server->getDimensionManager()->getDimension(($this->deathPosition ?? $this->location)->getWorld()));
 			$properties->setByte(EntityMetadataProperties::PLAYER_HAS_DIED, 1);
 		}else{
 			$properties->setBlockPos(EntityMetadataProperties::PLAYER_DEATH_POSITION, new BlockPosition(0, 0, 0));
-			$properties->setInt(EntityMetadataProperties::PLAYER_DEATH_DIMENSION, DimensionIds::OVERWORLD);
+			$properties->setInt(EntityMetadataProperties::PLAYER_DEATH_DIMENSION, $this->server->getDimensionManager()->getDimension(($this->deathPosition ?? $this->location)->getWorld()));
 			$properties->setByte(EntityMetadataProperties::PLAYER_HAS_DIED, 0);
 		}
 	}

@@ -228,4 +228,12 @@ class ChunkCache implements ChunkListener{
 		$total = $this->hits + $this->misses;
 		return $total > 0 ? $this->hits / $total : 0.0;
 	}
+
+	/** @phpstan-param DimensionIds::* $dimensionId */
+	public function setDimensionId(int $dimensionId) : void{
+		if($this->dimensionId !== $dimensionId){
+			$this->dimensionId = $dimensionId;
+			$this->caches = [];
+		}
+	}
 }

@@ -29,6 +29,7 @@ use pocketmine\nbt\NbtDataException;
 use pocketmine\nbt\TreeRoot;
 use pocketmine\network\mcpe\protocol\serializer\NetworkNbtSerializer;
 use pocketmine\utils\Utils;
+use pocketmine\world\format\io\GlobalBlockStateHandlers;
 use function array_key_first;
 use function array_map;
 use function count;
@@ -43,11 +44,23 @@ use const JSON_THROW_ON_ERROR;
  * Handles translation of network block runtime IDs into blockstate data, and vice versa
  */
 final class BlockStateDictionary{
+	/** Blockstate properties clients have from 1.26.50 that the server's block model does not. */
+	private const NETWORK_ONLY_PROPERTIES = [
+		"minecraft:corner" => true,
+		"minecraft:connection_north" => true,
+		"minecraft:connection_south" => true,
+		"minecraft:connection_east" => true,
+		"minecraft:connection_west" => true,
+	];
+
 	/**
 	 * @var int[][]|int[]
 	 * @phpstan-var array<string, array<string, int>|int>
 	 */
 	private array $stateDataToStateIdLookup = [];
+
+	/** @var array<string, array<string, int>> */
+	private array $networkStateDataToStateIdLookup = [];
 
 	/**
 	 * @var int[][]|null
@@ -58,14 +71,22 @@ final class BlockStateDictionary{
 	/**
 	 * @param BlockStateDictionaryEntry[] $states
 	 *
-	 * @phpstan-param list<BlockStateDictionaryEntry> $states
+	 * @phpstan-param array<int, BlockStateDictionaryEntry> $states
 	 */
 	public function __construct(
 		private array $states
 	){
 		$table = [];
 		foreach($this->states as $stateId => $stateNbt){
-			$table[$stateNbt->getStateName()][$stateNbt->getRawStateProperties()] = $stateId;
+			$raw = $stateNbt->getRawStateProperties();
+			$networkState = $stateNbt->generateStateData();
+			if(!$networkState->equals($stateNbt->generateCurrentStateData())){
+				$this->networkStateDataToStateIdLookup[$networkState->getName()][BlockStateDictionaryEntry::encodeStateProperties($networkState->getStates())] = $stateId;
+			}
+			if($stateNbt->hasStrippedProperties() && isset($table[$stateNbt->getStateName()][$raw])){
+				continue; //keep the default state (listed first) for server lookups
+			}
+			$table[$stateNbt->getStateName()][$raw] = $stateId;
 		}
 
 		//setup fast path for stateless blocks
@@ -74,6 +95,20 @@ final class BlockStateDictionary{
 				$this->stateDataToStateIdLookup[$name] = $stateIds[array_key_first($stateIds)];
 			}else{
 				$this->stateDataToStateIdLookup[$name] = $stateIds;
+			}
+		}
+
+		$standardSkull = $this->stateDataToStateIdLookup[BlockTypeNames::SKELETON_SKULL];
+		foreach([
+			BlockTypeNames::WITHER_SKELETON_SKULL,
+			BlockTypeNames::ZOMBIE_HEAD,
+			BlockTypeNames::PLAYER_HEAD,
+			BlockTypeNames::CREEPER_HEAD,
+			BlockTypeNames::DRAGON_HEAD,
+			BlockTypeNames::PIGLIN_HEAD
+		] as $skull){
+			if(!isset($this->stateDataToStateIdLookup[$skull])){
+				$this->stateDataToStateIdLookup[$skull] = $standardSkull;
 			}
 		}
 	}
@@ -109,12 +144,22 @@ final class BlockStateDictionary{
 		return ($this->states[$networkRuntimeId] ?? null)?->generateStateData();
 	}
 
+	public function generateCurrentDataFromStateId(int $networkRuntimeId) : ?BlockStateData{
+		return ($this->states[$networkRuntimeId] ?? null)?->generateCurrentStateData();
+	}
+
 	/**
 	 * Searches for the appropriate state ID which matches the given blockstate NBT.
 	 * Returns null if there were no matches.
 	 */
 	public function lookupStateIdFromData(BlockStateData $data) : ?int{
 		$name = $data->getName();
+		if(isset($this->networkStateDataToStateIdLookup[$name])){
+			$networkId = $this->networkStateDataToStateIdLookup[$name][BlockStateDictionaryEntry::encodeStateProperties($data->getStates())] ?? null;
+			if($networkId !== null){
+				return $networkId;
+			}
+		}
 
 		$lookup = $this->stateDataToStateIdLookup[$name] ?? null;
 		return match(true){
@@ -165,7 +210,11 @@ final class BlockStateDictionary{
 		);
 	}
 
-	public static function loadFromString(string $blockPaletteContents, string $metaMapContents) : self{
+	/**
+	 * @param int[]|null $networkIds when set, states are keyed by these (hashed) network ids instead of their index
+	 */
+	public static function loadFromString(string $blockPaletteContents, string $metaMapContents, ?array $networkIds = null) : self{
+		$upgrader = GlobalBlockStateHandlers::getUpgrader()->getBlockStateUpgrader();
 		$metaMap = json_decode($metaMapContents, flags: JSON_THROW_ON_ERROR);
 		if(!is_array($metaMap)){
 			throw new \InvalidArgumentException("Invalid metaMap, expected array for root type, got " . get_debug_type($metaMap));
@@ -183,7 +232,11 @@ final class BlockStateDictionary{
 			}
 		}
 
-		foreach(self::loadPaletteFromString($blockPaletteContents) as $i => $state){
+		$palette = self::loadPaletteFromString($blockPaletteContents);
+		if(count($palette) !== count($metaMap) || ($networkIds !== null && count($palette) !== count($networkIds))){
+			throw new \InvalidArgumentException("Palette, metadata and network IDs must have matching lengths");
+		}
+		foreach($palette as $i => $state){
 			$meta = $metaMap[$i] ?? null;
 			if($meta === null){
 				throw new \InvalidArgumentException("Missing associated meta value for state $i (" . $state->toNbt() . ")");
@@ -191,8 +244,21 @@ final class BlockStateDictionary{
 			if(!is_int($meta)){
 				throw new \InvalidArgumentException("Invalid metaMap offset $i, expected int, got " . get_debug_type($meta));
 			}
-			$uniqueName = $uniqueNames[$state->getName()] ??= $state->getName();
-			$entries[$i] = new BlockStateDictionaryEntry($uniqueName, $state->getStates(), $meta);
+			$newState = $upgrader->upgrade($state);
+			$uniqueName = $uniqueNames[$newState->getName()] ??= $newState->getName();
+			$currentStates = $newState->getStates();
+			$stripped = false;
+			foreach(Utils::stringifyKeys($currentStates) as $property => $_){
+				if(isset(self::NETWORK_ONLY_PROPERTIES[$property])){
+					unset($currentStates[$property]);
+					$stripped = true;
+				}
+			}
+			$networkId = $networkIds === null ? $i : ($networkIds[$i] ?? null);
+			if(!is_int($networkId) || isset($entries[$networkId])){
+				throw new \InvalidArgumentException("Invalid or duplicate network id for state $i");
+			}
+			$entries[$networkId] = new BlockStateDictionaryEntry($uniqueName, $currentStates, $meta, $stripped || !$newState->equals($state) ? $state : null, $stripped);
 		}
 
 		return new self($entries);

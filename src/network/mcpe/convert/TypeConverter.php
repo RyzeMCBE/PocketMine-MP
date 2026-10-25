@@ -62,6 +62,8 @@ use pocketmine\world\format\io\GlobalBlockStateHandlers;
 use pocketmine\world\format\io\GlobalItemDataHandlers;
 use function get_class;
 use function hash;
+use function json_decode;
+use const JSON_THROW_ON_ERROR;
 
 class TypeConverter{
 	use SingletonTrait;
@@ -85,8 +87,10 @@ class TypeConverter{
 
 		$canonicalBlockStatesRaw = Filesystem::fileGetContents(BedrockDataFiles::CANONICAL_BLOCK_STATES_NBT);
 		$metaMappingRaw = Filesystem::fileGetContents(BedrockDataFiles::BLOCK_STATE_META_MAP_JSON);
+		/** @var list<int> $networkIds */
+		$networkIds = json_decode(Filesystem::fileGetContents(BedrockDataFiles::BLOCK_NETWORK_IDS_JSON), true, flags: JSON_THROW_ON_ERROR);
 		$this->blockTranslator = new BlockTranslator(
-			BlockStateDictionary::loadFromString($canonicalBlockStatesRaw, $metaMappingRaw),
+			BlockStateDictionary::loadFromString($canonicalBlockStatesRaw, $metaMappingRaw, $networkIds),
 			GlobalBlockStateHandlers::getSerializer()
 		);
 
@@ -149,7 +153,7 @@ class TypeConverter{
 		if($ingredient instanceof MetaWildcardRecipeIngredient){
 			$id = $this->itemTypeDictionary->fromStringId($ingredient->getItemId());
 			$meta = self::RECIPE_INPUT_WILDCARD_META;
-			$descriptor = new IntIdMetaItemDescriptor($id, $meta);
+			$descriptor = new StringIdMetaItemDescriptor($ingredient->getItemId(), $meta);
 		}elseif($ingredient instanceof ExactRecipeIngredient){
 			$item = $ingredient->getItem();
 			[$id, $meta, $blockRuntimeId] = $this->itemTranslator->toNetworkId($item);
@@ -159,7 +163,7 @@ class TypeConverter{
 					throw new AssumptionFailedError("Every block state should have an associated meta value");
 				}
 			}
-			$descriptor = new IntIdMetaItemDescriptor($id, $meta);
+			$descriptor = new StringIdMetaItemDescriptor($this->itemTypeDictionary->fromIntId($id), $meta);
 		}elseif($ingredient instanceof TagWildcardRecipeIngredient){
 			$descriptor = new TagItemDescriptor($ingredient->getTagName());
 		}else{

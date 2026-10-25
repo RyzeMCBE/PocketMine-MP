@@ -61,6 +61,16 @@ class AsyncPoolTest extends TestCase{
 		self::assertTrue(LeakTestAsyncTask::$destroyed, "Task was not destroyed after 30 seconds");
 	}
 
+	public function testGenerationSubsetLeavesAnotherWorkerAvailable() : void{
+		$this->pool->submitTaskToWorker(new class extends AsyncTask{
+			public function onRun() : void{ usleep(20000); }
+		}, 0);
+		self::assertSame(0, $this->pool->selectWorkerWithLimit(1));
+		self::assertSame(1, $this->pool->selectWorker());
+		while($this->pool->collectTasks()){ usleep(1000); }
+		self::assertGreaterThanOrEqual(10.0, $this->pool->getTimingDiagnostics()['runP95']);
+	}
+
 	public function testPublishProgressRace() : void{
 		$task = new PublishProgressRaceAsyncTask();
 		$this->pool->submitTask($task);
