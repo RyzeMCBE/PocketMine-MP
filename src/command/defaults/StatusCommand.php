@@ -29,11 +29,13 @@ use pocketmine\lang\Translatable;
 use pocketmine\permission\DefaultPermissionNames;
 use pocketmine\utils\Process;
 use pocketmine\utils\TextFormat;
+use function array_sum;
 use function count;
 use function floor;
 use function microtime;
 use function number_format;
 use function round;
+use function sprintf;
 use function strval;
 
 class StatusCommand extends VanillaCommand{
@@ -128,6 +130,14 @@ class StatusCommand extends VanillaCommand{
 				l10n::pocketmine_command_status_world_timeStat(strval(round($world->getTickRateTime(), 2)))->prefix($timeColor)
 			));
 		}
+
+		$tickTimings = $server->getTickTimings();
+		$workerTimings = $server->getAsyncPool()->getTimingDiagnostics();
+		$save = $server->getWorldManager()->getAutoSaveDiagnostics();
+		$sender->sendMessage(TextFormat::GOLD . sprintf('Tick ms (last %d samples): mean %.2f, p95 %.2f, p99 %.2f, max %.2f', $tickTimings['count'], $tickTimings['mean'], $tickTimings['p95'], $tickTimings['p99'], $tickTimings['max']));
+		$sender->sendMessage(TextFormat::GOLD . sprintf('CPU capacity: %d; async workers: %d; pending tasks: %d', $server->getAvailableCpuCores(), $server->getAsyncPool()->getSize(), array_sum($server->getAsyncPool()->getTaskQueueSizes())));
+		$sender->sendMessage(TextFormat::GOLD . sprintf('Async p95 ms: wait %.2f, run %.2f, callback %.2f', $workerTimings['waitP95'], $workerTimings['runP95'], $workerTimings['completionP95']));
+		$sender->sendMessage(TextFormat::GOLD . sprintf('Autosave: %s; processed tasks: %d; step p95 %.2f ms, max %.2f ms', $save['pending'] ? 'pending' : 'idle', $save['processed'], $save['p95'], $save['max']));
 
 		return true;
 	}

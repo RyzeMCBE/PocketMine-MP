@@ -30,6 +30,8 @@ use pocketmine\event\world\WorldUnloadEvent;
 use pocketmine\lang\KnownTranslationFactory;
 use pocketmine\player\ChunkSelector;
 use pocketmine\Server;
+use pocketmine\utils\IncrementalTaskQueue;
+use pocketmine\utils\RollingTimings;
 use pocketmine\world\format\Chunk;
 use pocketmine\world\format\io\exception\CorruptedWorldException;
 use pocketmine\world\format\io\exception\UnsupportedWorldFormatException;
@@ -38,16 +40,20 @@ use pocketmine\world\format\io\WorldProviderManager;
 use pocketmine\world\format\io\WritableWorldProvider;
 use pocketmine\world\generator\GeneratorManager;
 use pocketmine\world\generator\InvalidGeneratorOptionsException;
+use pocketmine\YmlServerProperties;
 use Symfony\Component\Filesystem\Path;
 use function array_keys;
 use function array_shift;
+use function array_values;
 use function assert;
 use function count;
 use function floor;
 use function implode;
 use function intdiv;
 use function iterator_to_array;
+use function max;
 use function microtime;
+use function min;
 use function round;
 use function sprintf;
 use function strval;
@@ -66,12 +72,21 @@ class WorldManager{
 	private bool $autoSave = true;
 	private int $autoSaveTicks = self::TICKS_PER_AUTOSAVE;
 	private int $autoSaveTicker = 0;
+	private IncrementalTaskQueue $autoSaveQueue;
+	private RollingTimings $autoSaveTimings;
+	private int $autoSaveRetryTick = 0;
+	private int $autoSaveProcessed = 0;
+	private int $generationCursor = 0;
+	private bool $processingGenerationQueues = false;
 
 	public function __construct(
 		private Server $server,
 		private string $dataPath,
 		private WorldProviderManager $providerManager
-	){}
+	){
+		$this->autoSaveQueue = new IncrementalTaskQueue();
+		$this->autoSaveTimings = new RollingTimings();
+	}
 
 	public function getProviderManager() : WorldProviderManager{
 		return $this->providerManager;
@@ -343,6 +358,7 @@ class WorldManager{
 	}
 
 	public function tick(int $currentTick) : void{
+		$this->processChunkGenerationQueues();
 		foreach($this->worlds as $k => $world){
 			if(!isset($this->worlds[$k])){
 				// World unloaded during the tick of a world earlier in this loop, perhaps by plugin
@@ -358,18 +374,51 @@ class WorldManager{
 			}
 		}
 
-		if($this->autoSave && ++$this->autoSaveTicker >= $this->autoSaveTicks){
+		if($this->autoSave && ++$this->autoSaveTicker >= $this->autoSaveTicks && !$this->autoSaveQueue->hasWork()){
 			$this->autoSaveTicker = 0;
 			$this->server->getLogger()->debug("[Auto Save] Saving worlds...");
-			$start = microtime(true);
 			$this->doAutoSave();
-			$time = microtime(true) - $start;
-			$this->server->getLogger()->debug("[Auto Save] Save completed in " . ($time >= 1 ? round($time, 3) . "s" : round($time * 1000) . "ms"));
+		}
+		if($this->autoSaveQueue->hasWork() && $currentTick >= $this->autoSaveRetryTick){
+			$start = microtime(true);
+			try{
+				$config = $this->server->getConfigGroup();
+				$this->autoSaveProcessed += $this->autoSaveQueue->process(
+					max(1, min(50, $config->getPropertyInt(YmlServerProperties::AUTOSAVE_MAX_MILLISECONDS_PER_TICK, 2))) * 1000000,
+					max(1, min(1024, $config->getPropertyInt(YmlServerProperties::AUTOSAVE_MAX_TASKS_PER_TICK, 8)))
+				);
+			}catch(\Throwable $e){
+				$this->autoSaveRetryTick = $currentTick + Server::TARGET_TICKS_PER_SECOND;
+				$this->server->getLogger()->logException($e);
+			}
+			$this->autoSaveTimings->add((microtime(true) - $start) * 1000);
+			$this->autoSaveProcessed = $this->autoSaveQueue->getCompletedTasks();
 		}
 	}
 
 	public function getAutoSave() : bool{
 		return $this->autoSave;
+	}
+
+	/** @internal Resume throttled worlds even when only another world's tasks completed. */
+	public function processChunkGenerationQueues() : void{
+		if($this->processingGenerationQueues || $this->worlds === []){ return; }
+		$this->processingGenerationQueues = true;
+		try{
+			$worlds = array_values($this->worlds);
+			$count = count($worlds);
+			$offset = $this->generationCursor++ % $count;
+			$rounds = max(1, $this->server->getAsyncPool()->getSize() * 2);
+			for($round = 0; $round < $rounds; ++$round){
+				$started = 0;
+				for($i = 0; $i < $count; ++$i){
+					$started += $worlds[($offset + $i) % $count]->processQueuedChunkGeneration();
+				}
+				if($started === 0){ break; }
+			}
+		}finally{
+			$this->processingGenerationQueues = false;
+		}
 	}
 
 	public function setAutoSave(bool $value) : void{
@@ -395,12 +444,23 @@ class WorldManager{
 
 	private function doAutoSave() : void{
 		foreach($this->worlds as $world){
-			foreach($world->getPlayers() as $player){
-				if($player->spawned){
-					$player->save();
-				}
-			}
-			$world->save(false);
+			$this->autoSaveQueue->add($this->createAutoSaveTasks($world));
 		}
+	}
+
+	/** @return \Generator<int, \Closure() : void, void, void> */
+	private function createAutoSaveTasks(World $world) : \Generator{
+		foreach($world->getPlayers() as $player){
+			yield static function() use($player) : void{
+				if($player->isConnected() && $player->spawned){ $player->save(); }
+			};
+		}
+		yield from $world->createIncrementalSaveTasks();
+	}
+
+	/** @return array{pending: bool, processed: int, p95: float, max: float} */
+	public function getAutoSaveDiagnostics() : array{
+		$timings = $this->autoSaveTimings->summarize();
+		return ['pending' => $this->autoSaveQueue->hasWork(), 'processed' => $this->autoSaveProcessed, 'p95' => $timings['p95'], 'max' => $timings['max']];
 	}
 }

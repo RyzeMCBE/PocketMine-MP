@@ -48,7 +48,8 @@ final class AsyncGeneratorExecutor implements GeneratorExecutor{
 		\Logger $logger,
 		private readonly AsyncPool $workerPool,
 		private readonly GeneratorExecutorSetupParameters $setupParameters,
-		?int $asyncContextId = null
+		?int $asyncContextId = null,
+		private readonly ?int $workerLimit = null
 	){
 		$this->logger = new \PrefixedLogger($logger, "AsyncGeneratorExecutor");
 
@@ -88,7 +89,7 @@ final class AsyncGeneratorExecutor implements GeneratorExecutor{
 			$adjacentChunks,
 			$onCompletion
 		);
-		$workerId = $this->workerPool->selectWorker();
+		$workerId = $this->workerLimit === null ? $this->workerPool->selectWorker() : $this->workerPool->selectWorkerWithLimit($this->workerLimit);
 		if(!isset($this->workerPool->getRunningWorkers()[$workerId]) && isset($this->generatorRegisteredWorkers[$workerId])){
 			$this->logger->debug("Selected worker $workerId previously had generator registered, but is now offline");
 			unset($this->generatorRegisteredWorkers[$workerId]);
