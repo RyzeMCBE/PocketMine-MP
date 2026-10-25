@@ -83,7 +83,6 @@ use pocketmine\Server;
 use pocketmine\ServerConfigGroup;
 use pocketmine\utils\AssumptionFailedError;
 use pocketmine\utils\Limits;
-use pocketmine\utils\ReversePriorityQueue;
 use pocketmine\utils\Utils;
 use pocketmine\world\biome\Biome;
 use pocketmine\world\biome\BiomeRegistry;
@@ -302,13 +301,7 @@ class World implements ChunkManager{
 	 */
 	private array $changedBlocks = [];
 
-	/** @phpstan-var ReversePriorityQueue<int, Vector3> */
-	private ReversePriorityQueue $scheduledBlockUpdateQueue;
-	/**
-	 * @var int[] blockHash => tick delay
-	 * @phpstan-var array<BlockPosHash, int>
-	 */
-	private array $scheduledBlockUpdateQueueIndex = [];
+	private ScheduledBlockUpdateQueue $scheduledBlockUpdateQueue;
 
 	/** @phpstan-var \SplQueue<int> */
 	private \SplQueue $neighbourBlockUpdateQueue;
@@ -532,8 +525,7 @@ class World implements ChunkManager{
 			}
 		});
 
-		$this->scheduledBlockUpdateQueue = new ReversePriorityQueue();
-		$this->scheduledBlockUpdateQueue->setExtractFlags(\SplPriorityQueue::EXTR_BOTH);
+		$this->scheduledBlockUpdateQueue = new ScheduledBlockUpdateQueue();
 
 		$this->neighbourBlockUpdateQueue = new \SplQueue();
 
@@ -953,10 +945,7 @@ class World implements ChunkManager{
 
 		$this->timings->scheduledBlockUpdates->startTiming();
 		//Delayed updates
-		while($this->scheduledBlockUpdateQueue->count() > 0 && $this->scheduledBlockUpdateQueue->current()["priority"] <= $currentTick){
-			/** @var Vector3 $vec */
-			$vec = $this->scheduledBlockUpdateQueue->extract()["data"];
-			unset($this->scheduledBlockUpdateQueueIndex[World::blockHash($vec->x, $vec->y, $vec->z)]);
+		while(($vec = $this->scheduledBlockUpdateQueue->fetchReady($currentTick)) !== null){
 			if(!$this->isInLoadedTerrain($vec)){
 				continue;
 			}
@@ -1466,14 +1455,10 @@ class World implements ChunkManager{
 	 * Blocks will be updated with the scheduled update type.
 	 */
 	public function scheduleDelayedBlockUpdate(Vector3 $pos, int $delay) : void{
-		if(
-			!$this->isInWorld($pos->x, $pos->y, $pos->z) ||
-			(isset($this->scheduledBlockUpdateQueueIndex[$index = World::blockHash($pos->x, $pos->y, $pos->z)]) && $this->scheduledBlockUpdateQueueIndex[$index] <= $delay)
-		){
+		if(!$this->isInWorld($pos->x, $pos->y, $pos->z)){
 			return;
 		}
-		$this->scheduledBlockUpdateQueueIndex[$index] = $delay;
-		$this->scheduledBlockUpdateQueue->insert(new Vector3((int) $pos->x, (int) $pos->y, (int) $pos->z), $delay + $this->server->getTick());
+		$this->scheduledBlockUpdateQueue->schedule($pos, $delay + $this->server->getTick());
 	}
 
 	private function tryAddToNeighbourUpdateQueue(int $x, int $y, int $z) : void{
